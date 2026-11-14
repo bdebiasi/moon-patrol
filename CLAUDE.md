@@ -3,12 +3,13 @@
 ## Contexto
 - Trabalho de Arquitetura de Computadores (UCS), em dupla: jogo inspirado no Moon Patrol, versao simplificada (1 fase, naves com trajetoria fixa, pista plana).
 - A apresentacao e obrigatoria e acontece **exclusivamente no GUI Turbo Assembler** (Windows, TASM + DOSBox). Se nao montar e rodar la, o trabalho nao e avaliado.
-- A especificacao completa esta em `docs/enunciado.pdf`. Este arquivo e um resumo; em caso de conflito, o PDF manda.
+- A especificacao completa esta em `conteudo-trabalho-arquitetura/PDF-trabalho-a-ser-feito.pdf`. Este arquivo e um resumo; em caso de conflito, o PDF manda.
 - O desenvolvimento e feito por partes. Prefira mudancas pequenas e testaveis.
 
-## O que o Claude NAO consegue fazer aqui
-- Nao e possivel montar nem executar o programa neste ambiente. Nunca afirme que o codigo "funciona" ou "foi testado".
-- Ao terminar cada parte, diga exatamente o que testar no GUI Turbo Assembler. O usuario cola os erros do TASM e voce corrige.
+## Validacao
+- Verificar se o GUI Turbo Assembler esta disponivel. So afirmar que montou ou executou quando isso tiver sido observado; distinguir revisao estatica de teste de execucao.
+- Ao terminar cada parte, registrar os testes realizados e o que ainda precisa ser conferido no GUI Turbo Assembler.
+- Nesta etapa: montagem TASM 4.1 e vinculacao TLINK 7.1 sem erros/avisos, usando o DOSBox 0.74-3 fornecido pelo GUI Turbo Assembler. Testes temporarios em Assembly passaram para limites, salto completo (inclusive parado), movimento no ar, bloqueio de novo salto, registradores e comparacao dos pixels do terreno restaurado. Execucao visual confirmou menu, entrada no jogo, movimento horizontal e ESC de volta ao menu. A montagem foi feita pela linha de comando do emulador; repetir pela interface do IDE na apresentacao.
 
 ## Regras obrigatorias
 
@@ -20,7 +21,7 @@ Sem diretivas `.186`, `.286`, `.386`. Proibido:
 - Deslocamento/rotacao com contagem imediata diferente de 1 (`shl ax, 3` e invalido; use `mov cl, 3` + `shl ax, cl`)
 - Registradores de 32 bits (EAX, EBX...), `MOVZX`/`MOVSX`, `JECXZ`, `CWDE`
 
-Fonte do que e permitido: `docs/apostila_8086.pdf`. A `docs/tabela_instrucoes.pdf` cobre 80186+ e 386; use so para consultar flags.
+Referencia de instrucoes fornecida: `conteudo-trabalho-arquitetura/PDF-conteudo-1.pdf`. Os exemplos dos slides devem ser conferidos quanto a compatibilidade com 8086.
 
 ### 2. Sintaxe TASM, modelo small
 ```asm
@@ -46,7 +47,7 @@ end inicio
 - Modo 13h (320x200, 1 byte por pixel, segmento A000h, offset = y*320 + x).
 - Imprimir e apagar graficos **somente** via enderecamento indireto (`[DI]`, `[BX+SI]`, `[BX+desloc]`...) ou instrucoes de string (`STOSB`/`STOSW`/`MOVSB`/`MOVSW`, com `REP`).
 - Proibido: `INT 10h/0Ch` para pixel e enderecamento direto (`mov es:[1234h], al`).
-- `INT 10h` apenas para texto.
+- `INT 10h` para texto e troca de modo; nunca para desenhar/apagar pixels.
 
 ### 4. Sem duplicacao de rotinas
 Uma rotina generica para cada tarefa, servindo todos os objetos (jipe, naves, rochas, crateras, tiros):
@@ -55,7 +56,7 @@ Uma rotina generica para cada tarefa, servindo todos os objetos (jipe, naves, ro
 - `MoveObjetos`: percorre a tabela de objetos aplicando velocidade
 - `ColisaoRet`: teste de sobreposicao entre dois retangulos
 
-Nunca criar `DesenhaNave1`, `DesenhaNave2`, `MoveJipe` separado de `MoveNave` etc.
+Evitar rotinas de desenho ou aplicacao de velocidade duplicadas por tipo de objeto. Controles e regras especificas (como o salto em `GAME_STEP`) podem ser separados, reutilizando `MOVE_OBJECTS`.
 
 ### 5. Constantes para tudo
 Todo valor do enunciado vira `EQU`: posicoes iniciais, tamanhos, velocidades, limites, pontuacoes, quantidade maxima de naves, duracao do jogo, intervalo entre frames. Zero numeros magicos no codigo. Tempos e velocidades precisam ser ajustaveis so pelas constantes.
@@ -84,7 +85,7 @@ Todo valor do enunciado vira `EQU`: posicoes iniciais, tamanhos, velocidades, li
 - **Tabelas de objetos:** registros de tamanho fixo com offsets em `EQU` (ex.: `OBJ_ATIVO`, `OBJ_X`, `OBJ_Y`, `OBJ_LARG`, `OBJ_ALT`, `OBJ_SPRITE`, `OBJ_TIPO`, `OBJ_HITS`, `OBJ_PONTUADO`), acessados com `[BX+OBJ_X]`. E isso que permite as rotinas genericas.
 - **Sprites:** `db` linha a linha, 1 byte = 1 cor. Uma cor reservada `TRANSPARENTE EQU 0FFh` e pulada na copia.
 - **Endereco de linha:** usar tabela de 200 words com o offset de cada linha (evita `MUL` por pixel), ou y*320 = (y shl 8) + (y shl 6) usando CL.
-- **Ordem de desenho por frame:** terreno → obstaculos → jipe → tiros. No espaco lunar, apagar com preto e redesenhar.
+- **Ordem de desenho por frame:** terreno → obstaculos → jipe → tiros. No menu, apagar com preto. No jogo, apagar as posicoes antigas, restaurar o terreno e entao redesenhar os objetos; preto sozinho danifica as montanhas.
 - **Opcional (reduz flicker):** sincronizar com o retraco vertical (porta 3DAh, bit 3, via `IN AL, DX`).
 
 ## Armadilhas conhecidas
@@ -183,7 +184,7 @@ Os bitmaps oficiais sao imagens no enunciado (Figuras 5, 6, 7, 10, 11, 12). Ao t
     - Rocha 4: destruida com 2 tiros consecutivos.
   - Destruir ou saltar uma rocha: +50.
 
-### Servicos uteis (conferir parametros em `docs/interrupcoes.pdf`)
+### Servicos uteis (conferir parametros no enunciado, pp. 15-16)
 - **Texto colorido:** `INT 10h/13h` (AL = 0, BL = cor, BH = pagina, DH/DL = linha/coluna, CX = tamanho, ES:BP = string).
 - **Pausa entre frames:** `INT 15h/86h`, com CX:DX = microssegundos (ex.: 30 ms → CX = 0, DX = 7530h).
 - **Teclado sem esperar:** `INT 16h/01h` (ZF = 1 significa buffer vazio); depois `INT 16h/00h` para ler e remover a tecla.
@@ -198,29 +199,35 @@ Nao inventar funcoes de interrupcao: usar so o que esta documentado nos PDFs.
 - [ ] Barra de status completa
 - [ ] Geracao aleatoria de grupos de naves, movimento e remocao a esquerda (tiros das naves sao opcionais)
 - [ ] Scroll continuo do terreno com recomposicao pela direita
-- [ ] Salto com seta para cima; jipe some ao atingir cratera ou rocha, e as vidas sao atualizadas
+- [x] Movimento horizontal na metade esquerda e salto com seta para cima
+- [ ] Jipe some ao atingir cratera ou rocha, e as vidas sao atualizadas
 - [ ] Pontuacao correta
 - [ ] Crateras e rochas conforme as regras
 - [ ] Game Over por vidas ou tempo, com placar; tecla volta ao menu
 - [ ] Constantes para todas as definicoes
 - [ ] Cabecalho em todas as rotinas
 
-**Opcionais (pontuacao extra):** tiros do jipe (frontal e superior), tiros das naves e qualquer elemento extra (ex.: parallax entre montanhas e montes).
+**Especificacao completa e minimo avaliavel:** os tiros do jipe e das naves estao descritos nas secoes de requisitos, mas sao explicitamente dispensados no Minimo Entregavel (p. 14). Sao opcionais para esse minimo e contam como pontuacao complementar; elementos extras, como parallax, tambem sao complementares. Os demais itens da lista acima continuam obrigatorios. Esta etapa implementa somente movimento/salto, sem completar o minimo do trabalho.
 
 ## Ambiguidades do enunciado (deixar parametrizado)
-- "5 px de deslocamento horizontal" no topo do salto: conta o scroll do cenario ou o movimento do jipe?
+- "5 px de deslocamento horizontal" no topo: nesta etapa contam-se 5 pixels de avanco nominal no mundo, a `JUMP_WORLD_VX = 1` pixel/quadro (5 intervalos no topo). O contador independe das setas e das bordas para que o salto termine mesmo parado. Ainda nao ha scroll; quando ele for implementado, usar o mesmo avanco para o contador.
 - Linhas exatas das montanhas e da pista (100 + 95 = 195 ultrapassa o topo da pista em 193).
 - Criterio exato de queda na cratera (quanto do jipe precisa estar sobre ela).
 - Tamanho do tiro superior do jipe.
 
-## Documentos de referencia (`docs/`)
-- `enunciado.pdf`: especificacao do TDE (fonte da verdade)
-- `apostila_8086.pdf`: apostila do Koliver, referencia de cada instrucao do 8086/88
-- `slides_8086.pdf`: estrutura do programa, diretivas e conjunto de instrucoes
-- `slides_vetores.pdf`: vetores, modos de enderecamento e instrucoes de string
-- `slides_video.pdf`: rotinas de interrupcao, macros, video, mouse e arquivos
-- `interrupcoes.pdf`: Apendice II, referencia das interrupcoes do PC
-- `tabela_instrucoes.pdf`: tabela rapida (80186+; ver regra 1)
+## Estado implementado nesta etapa
+- Menu e sprites preservados. `GAME_RUN` le uma tecla sem bloquear por quadro, apaga objetos antigos, chama `GAME_STEP`, restaura `DRAW_TERRAIN`, redesenha `DRAW_OBJECTS` e chama `WAIT_FRAME`. ESC retorna ao menu.
+- `GAME_STEP` define VX pelas setas (2 pixels por evento de tecla), chama `MOVE_OBJECTS` e limita X a 0..140, mantendo o sprite inteiro nas colunas 0..159.
+- Salto: Y vai de 183 a 168 e volta em passos de 3; `OBJ_VY` e a altura indicam a etapa. Apenas `jump_top_left` foi acrescentada ao estado, sem novo salto no ar.
+- Leitura BIOS preservada: teclas seguradas dependem da repeticao automatica, sem leitura simultanea de teclas. As setas horizontais funcionam durante todas as etapas do salto.
+- Redesenho usa as rotinas existentes, sem buffer adicional. As rotinas de sprite/retangulo recortam somente na horizontal: os chamadores devem garantir `0 <= Y` e `Y + altura <= SCREEN_H`. O jipe fica em Y=168..183 (ultima linha 192); objetos do menu tambem ficam dentro da tela.
+- Scroll, inimigos, obstaculos, colisoes, tiros, contagem regressiva e Game Over continuam pendentes.
+
+## Documentos de referencia (`conteudo-trabalho-arquitetura/`)
+- `PDF-trabalho-a-ser-feito.pdf`: especificacao do TDE (fonte da verdade).
+- `PDF-conteudo-1.pdf`: estrutura de programas e instrucoes do 8086/88.
+- `PDF-conteudo-2.pdf`: vetores, enderecamento indireto e instrucoes de string.
+- `PDF-exercicios-conteudo.pdf`: o arquivo fornecido contem uma unica pagina em branco.
 
 ## Forma de trabalho
 - Responder em portugues, de forma direta.

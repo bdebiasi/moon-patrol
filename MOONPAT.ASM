@@ -1,12 +1,13 @@
 ;==============================================================================
-; MOON PATROL - PARTE 1: TELA INICIAL
+; MOON PATROL - TELA INICIAL E MOVIMENTACAO DO JIPE
 ;------------------------------------------------------------------------------
 ; Montador : TASM (GUI Turbo Assembler). Codigo 8086 puro (sem 186/286).
 ; Video    : modo 13h (320x200, 256 cores). Os pixels sao escritos no
 ;            segmento A000h somente com enderecamento indireto (ES:[DI]) e
 ;            instrucoes de string (REP STOSB); a INT 10h e usada apenas para
 ;            trocar o modo e escrever texto.
-; Teclas   : SETA CIMA/BAIXO escolhe, ENTER confirma, ESC sai
+; Teclas   : menu: CIMA/BAIXO e ENTER; jogo: ESQ./DIR. e CIMA para saltar
+;            ESC volta ao menu (ou sai, na tela inicial)
 ;==============================================================================
 .MODEL SMALL
 .STACK 400h
@@ -44,6 +45,8 @@ BOX_BORDERS     EQU 2           ; colunas ocupadas pelas bordas laterais
 ; --- Teclado (scan codes da INT 16h) ---
 KEY_UP          EQU 48h
 KEY_DOWN        EQU 50h
+KEY_LEFT        EQU 4Bh
+KEY_RIGHT       EQU 4Dh
 KEY_ENTER       EQU 1Ch
 KEY_ESC         EQU 01h
 
@@ -153,6 +156,14 @@ GAME_TIME       EQU 60          ; duracao da partida em segundos (<= 99)
 PARADO          EQU 0           ; velocidade nula
 JEEP_START_X    EQU 0           ; coluna em que o jipe nasce/renasce
 JEEP_GAME_Y     EQU TRACK_Y - JEEP_H                ; jipe no chao
+JEEP_SPEED      EQU 2           ; pixels por tecla/quadro (maior que ANIM_SHIP_VX)
+JEEP_MIN_X      EQU 0
+JEEP_MAX_X      EQU SCREEN_W / 2 - JEEP_W    ; sprite inteiro na metade esquerda
+JUMP_HEIGHT     EQU 15          ; altura maxima acima do chao
+JUMP_SPEED      EQU 3           ; pixels verticais por quadro
+JUMP_TOP_Y      EQU JEEP_GAME_Y - JUMP_HEIGHT
+JUMP_TOP_DX     EQU 5           ; percurso horizontal no topo
+JUMP_WORLD_VX   EQU 1           ; avanco nominal de 1 pixel/quadro, sem scroll ainda
 
 ;==============================================================================
 ; MACROS
@@ -213,6 +224,7 @@ lives           DW LIVES_START
 time_left       DW GAME_TIME                    ; segundos restantes
 back_scroll     DW SCROLL_START                 ; 0 .. MOUNT_BACK_W - 1
 front_scroll    DW SCROLL_START                 ; 0 .. MOUNT_FRONT_W - 1
+jump_top_left   DW 0                            ; pixels restantes no topo
 num_buf         DB NUM_MAX_DIGITS + 1 DUP (0)   ; digitos + 0 final
 
 ; Sprites: 1 byte por pixel (cor), linha a linha. 0FFh = transparente.
@@ -1157,11 +1169,11 @@ MENU_RUN ENDP
 
 ;------------------------------------------------------------------------------
 ; GAME_RUN
-; Funcao : laco principal do jogo. Por enquanto so inicializa a partida,
-;          desenha a tela de jogo e espera ESC para voltar ao menu
-;          (le teclado sem esperar -> [atualiza] -> [desenha] -> pausa)
+; Funcao : le teclado sem esperar, atualiza objetos/salto, reconstroi o
+;          terreno e desenha os objetos; ESC retorna ao menu
 ; Entrada: nenhuma
-; Saida  : nenhuma
+; Saida  : estado da partida atualizado (registradores preservados)
+; Usa    : AX, CX, DI; demais registradores usados pelas rotinas chamadas
 ;------------------------------------------------------------------------------
 GAME_RUN PROC
     PUSH_ALL
@@ -1169,12 +1181,18 @@ GAME_RUN PROC
     call DRAW_GAME_SCREEN
     call FLUSH_KEYS
 gr_frame:
-    call WAIT_FRAME
     call GET_KEY_NB             ; AX = tecla ou 0
-    or   ax, ax
-    jz   gr_frame
     cmp  ah, KEY_ESC
-    jne  gr_frame               ; demais teclas: ainda sem acao
+    je   gr_done
+    mov  di, OFFSET game_tab
+    mov  cx, GAME_OBJS
+    call ERASE_OBJECTS          ; posicoes antigas; o terreno sera restaurado
+    call GAME_STEP
+    call DRAW_TERRAIN           ; recompoe montanhas e pista apagadas
+    call DRAW_OBJECTS
+    call WAIT_FRAME
+    jmp  gr_frame
+gr_done:
     POP_ALL
     ret
 GAME_RUN ENDP
@@ -1182,9 +1200,10 @@ GAME_RUN ENDP
 ;------------------------------------------------------------------------------
 ; GAME_INIT
 ; Funcao : coloca a partida no estado inicial (score, vidas, tempo, scroll
-;          do terreno e tabela de objetos)
+;          do terreno, salto e tabela de objetos)
 ; Entrada: nenhuma
-; Saida  : variaveis da partida e game_tab inicializadas
+; Saida  : variaveis da partida e game_tab inicializadas (registradores preservados)
+; Usa    : CX, SI, DI
 ;------------------------------------------------------------------------------
 GAME_INIT PROC
     push cx
@@ -1195,6 +1214,7 @@ GAME_INIT PROC
     mov  [time_left], GAME_TIME
     mov  [back_scroll], SCROLL_START
     mov  [front_scroll], SCROLL_START
+    mov  [jump_top_left], 0
     mov  si, OFFSET game_tab0
     mov  di, OFFSET game_tab
     mov  cx, GAME_TAB_BYTES
@@ -1204,6 +1224,75 @@ GAME_INIT PROC
     pop  cx
     ret
 GAME_INIT ENDP
+
+;------------------------------------------------------------------------------
+; GAME_STEP
+; Funcao : define as velocidades pelas setas e controla os limites e o salto.
+;          MOVE_OBJECTS continua sendo a unica rotina que aplica velocidades.
+;          OBJ_VY < 0 = subida; Y = topo e VY = 0 = topo; VY > 0 = descida.
+;          O topo conta o avanco nominal no mundo (1 pixel/quadro), mesmo
+;          sem seta horizontal ou na borda. Nao implementa scroll do terreno.
+; Entrada: AH = scan code ou 0; game_tab (primeiro registro = jipe), jump_top_left
+; Saida  : game_tab e jump_top_left atualizados (registradores preservados)
+; Usa    : CX, DI; AX e usado por MOVE_OBJECTS (tambem preservado)
+;------------------------------------------------------------------------------
+GAME_STEP PROC
+    push cx
+    push di
+    mov  di, OFFSET game_tab
+    mov  word ptr [di + OBJ_VX], PARADO
+    cmp  ah, KEY_LEFT
+    je   gs_left
+    cmp  ah, KEY_RIGHT
+    je   gs_right
+    cmp  ah, KEY_UP
+    jne  gs_top
+    cmp  word ptr [di + OBJ_Y], JEEP_GAME_Y
+    jne  gs_top                 ; nao inicia outro salto no ar
+    mov  word ptr [di + OBJ_VY], -JUMP_SPEED
+    jmp  gs_top
+gs_left:
+    mov  word ptr [di + OBJ_VX], -JEEP_SPEED
+    jmp  gs_top
+gs_right:
+    mov  word ptr [di + OBJ_VX], JEEP_SPEED
+gs_top:
+    cmp  word ptr [di + OBJ_Y], JUMP_TOP_Y
+    jne  gs_move
+    cmp  word ptr [di + OBJ_VY], PARADO
+    jne  gs_move
+    sub  [jump_top_left], JUMP_WORLD_VX
+    ja   gs_move
+    mov  word ptr [di + OBJ_VY], JUMP_SPEED
+gs_move:
+    mov  cx, GAME_OBJS
+    call MOVE_OBJECTS
+    cmp  word ptr [di + OBJ_X], JEEP_MIN_X
+    jge  gs_right_limit
+    mov  word ptr [di + OBJ_X], JEEP_MIN_X
+gs_right_limit:
+    cmp  word ptr [di + OBJ_X], JEEP_MAX_X
+    jle  gs_jump
+    mov  word ptr [di + OBJ_X], JEEP_MAX_X
+gs_jump:
+    cmp  word ptr [di + OBJ_VY], PARADO
+    jge  gs_ground
+    cmp  word ptr [di + OBJ_Y], JUMP_TOP_Y
+    jg   gs_done
+    mov  word ptr [di + OBJ_Y], JUMP_TOP_Y
+    mov  word ptr [di + OBJ_VY], PARADO
+    mov  [jump_top_left], JUMP_TOP_DX
+    jmp  gs_done
+gs_ground:
+    cmp  word ptr [di + OBJ_Y], JEEP_GAME_Y
+    jl   gs_done
+    mov  word ptr [di + OBJ_Y], JEEP_GAME_Y
+    mov  word ptr [di + OBJ_VY], PARADO
+gs_done:
+    pop  di
+    pop  cx
+    ret
+GAME_STEP ENDP
 
 ;------------------------------------------------------------------------------
 ; DRAW_GAME_SCREEN
