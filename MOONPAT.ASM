@@ -1,5 +1,5 @@
 ;==============================================================================
-; MOON PATROL - TELA INICIAL E MOVIMENTACAO DO JIPE
+; MOON PATROL - MENU, JIPE, CENARIO, NAVES E TEMPO
 ;------------------------------------------------------------------------------
 ; Montador : TASM (GUI Turbo Assembler). Codigo 8086 puro (sem 186/286).
 ; Video    : modo 13h (320x200, 256 cores). Os pixels sao escritos no
@@ -125,6 +125,29 @@ MOUNT_FRONT_W   EQU 256         ; colunas do bitmap da frente
 MOUNT_FRONT_H   EQU 64
 MOUNT_FRONT_Y   EQU TRACK_Y - MOUNT_FRONT_H     ; linha do topo da frente
 SCROLL_START    EQU 0           ; coluna do bitmap mostrada em x = 0
+SCROLL_SPEED    EQU 1           ; pixels/quadro para a esquerda (menor que as larguras)
+
+; --- Naves no jogo ---
+SHIP_MAX_GROUP  EQU 3
+SHIP_TYPES      EQU 3
+SHIP_SPEED      EQU 1           ; pixels/quadro para a esquerda
+SHIP_GAP        EQU 30          ; pixels livres entre os retangulos
+SHIP_STEP_X     EQU SHIP_W + SHIP_GAP
+SHIP_MIN_X      EQU SCREEN_W / 2
+SHIP_MAX_X      EQU SCREEN_W - SHIP_W
+SHIP_MIN_Y      EQU STATUS_H
+SHIP_MAX_Y      EQU MOUNT_TOP_Y - SHIP_H
+RANDOM_MULT     EQU 25173       ; gerador congruente de 16 bits
+RANDOM_ADD      EQU 13849
+
+; --- Relogio e fim de jogo ---
+CS_PER_SECOND   EQU 100
+CS_PER_MINUTE   EQU 60 * CS_PER_SECOND
+CLOCK_UNSET     EQU 0FFFFh
+COLOR_OVER      EQU 04h
+OVER_ROW        EQU 6
+OVER_LINES      EQU 5
+OVER_SCORE_ROW  EQU OVER_ROW + 2 * (OVER_LINES + 1) + 1
 
 ; --- Barra de status (layout de "status do jogo.png") ---
 ; [coracoes]            [score]               [relogio] [tempo]
@@ -163,7 +186,7 @@ JUMP_HEIGHT     EQU 15          ; altura maxima acima do chao
 JUMP_SPEED      EQU 3           ; pixels verticais por quadro
 JUMP_TOP_Y      EQU JEEP_GAME_Y - JUMP_HEIGHT
 JUMP_TOP_DX     EQU 5           ; percurso horizontal no topo
-JUMP_WORLD_VX   EQU 1           ; avanco nominal de 1 pixel/quadro, sem scroll ainda
+JUMP_WORLD_VX   EQU SCROLL_SPEED ; topo acompanha o deslocamento real do terreno
 
 ;==============================================================================
 ; MACROS
@@ -207,6 +230,18 @@ title_patrol    DB ' ____   _  _____ ____   ___  _     ',0
                 DB '|  __/ ___ \| | |  _ <| |_| | |___ ',0
                 DB '|_| /_/   \_\_| |_| \_\\___/|_____|',0
 
+; GAME OVER em dois blocos de arte ASCII (mesmo desenho de texto do titulo).
+over_game       DB ' ###    #   #   # #####',0
+                DB '#   #  # #  ## ## #    ',0
+                DB '#     ##### # # # #### ',0
+                DB '#  ## #   # #   # #    ',0
+                DB ' ###  #   # #   # #####',0
+over_over       DB ' ###  #   # ##### #### ',0
+                DB '#   # #   # #     #   #',0
+                DB '#   # #   # ####  #### ',0
+                DB '#   #  # #  #     #  # ',0
+                DB ' ###    #   ##### #   #',0
+
 ; Textos do menu e tabela com o endereco de cada um (indice = opcao)
 menu_opt_play   DB 'Jogar',0
 menu_opt_exit   DB 'Sair',0
@@ -225,6 +260,9 @@ time_left       DW GAME_TIME                    ; segundos restantes
 back_scroll     DW SCROLL_START                 ; 0 .. MOUNT_BACK_W - 1
 front_scroll    DW SCROLL_START                 ; 0 .. MOUNT_FRONT_W - 1
 jump_top_left   DW 0                            ; pixels restantes no topo
+clock_last      DW CLOCK_UNSET                  ; centesimos dentro do minuto
+clock_frac      DW 0                            ; fracao de segundo acumulada
+random_seed     DW 0
 num_buf         DB NUM_MAX_DIGITS + 1 DUP (0)   ; digitos + 0 final
 
 ; Sprites: 1 byte por pixel (cor), linha a linha. 0FFh = transparente.
@@ -1075,10 +1113,11 @@ spr_clock   DB 0FFh,0FFh,0Eh,0Eh,0Eh,0FFh,0FFh
 heart_ptrs  DW OFFSET spr_heart1, OFFSET spr_heart2, OFFSET spr_heart3
 heart_ws    DW HEART1_W, HEART2_W, HEART3_W
 
-; Tabela inicial dos objetos do jogo (por enquanto so o jipe).
+; Tabela inicial dos objetos do jogo: jipe seguido das vagas para naves.
 ; Campos de cada registro: ATIVO, X, Y, LARG, ALT, VX, VY, SPRITE
 game_tab0   DW ATIVO, JEEP_START_X, JEEP_GAME_Y
             DW JEEP_W, JEEP_H, PARADO, PARADO, OFFSET spr_jeep
+            DW SHIP_MAX_GROUP * (OBJ_TAM / WORD_BYTES) DUP (0)
 GAME_TAB_BYTES  EQU $ - game_tab0
 GAME_OBJS       EQU GAME_TAB_BYTES / OBJ_TAM
 
@@ -1169,8 +1208,8 @@ MENU_RUN ENDP
 
 ;------------------------------------------------------------------------------
 ; GAME_RUN
-; Funcao : le teclado sem esperar, atualiza objetos/salto, reconstroi o
-;          terreno e desenha os objetos; ESC retorna ao menu
+; Funcao : atualiza tempo, objetos/salto e terreno; ESC retorna ao menu.
+;          Tempo ou vidas zerados mostram Game Over antes do retorno.
 ; Entrada: nenhuma
 ; Saida  : estado da partida atualizado (registradores preservados)
 ; Usa    : AX, CX, DI; demais registradores usados pelas rotinas chamadas
@@ -1181,6 +1220,11 @@ GAME_RUN PROC
     call DRAW_GAME_SCREEN
     call FLUSH_KEYS
 gr_frame:
+    call UPDATE_TIME
+    cmp  [time_left], 0
+    je   gr_over
+    cmp  [lives], 0
+    je   gr_over
     call GET_KEY_NB             ; AX = tecla ou 0
     cmp  ah, KEY_ESC
     je   gr_done
@@ -1192,6 +1236,8 @@ gr_frame:
     call DRAW_OBJECTS
     call WAIT_FRAME
     jmp  gr_frame
+gr_over:
+    call GAME_OVER
 gr_done:
     POP_ALL
     ret
@@ -1200,12 +1246,13 @@ GAME_RUN ENDP
 ;------------------------------------------------------------------------------
 ; GAME_INIT
 ; Funcao : coloca a partida no estado inicial (score, vidas, tempo, scroll
-;          do terreno, salto e tabela de objetos)
+;          do terreno, salto, relogio e tabela de objetos com o primeiro grupo)
 ; Entrada: nenhuma
 ; Saida  : variaveis da partida e game_tab inicializadas (registradores preservados)
-; Usa    : CX, SI, DI
+; Usa    : AX, CX, SI, DI; rotinas chamadas preservam seus registradores
 ;------------------------------------------------------------------------------
 GAME_INIT PROC
+    push ax
     push cx
     push si
     push di
@@ -1215,13 +1262,20 @@ GAME_INIT PROC
     mov  [back_scroll], SCROLL_START
     mov  [front_scroll], SCROLL_START
     mov  [jump_top_left], 0
+    mov  [clock_last], CLOCK_UNSET
+    mov  [clock_frac], 0
+    call UPDATE_TIME            ; apenas registra o instante inicial
+    mov  ax, [clock_last]
+    mov  [random_seed], ax
     mov  si, OFFSET game_tab0
     mov  di, OFFSET game_tab
     mov  cx, GAME_TAB_BYTES
     call COPY_BYTES
+    call SHIPS_STEP
     pop  di
     pop  si
     pop  cx
+    pop  ax
     ret
 GAME_INIT ENDP
 
@@ -1230,10 +1284,10 @@ GAME_INIT ENDP
 ; Funcao : define as velocidades pelas setas e controla os limites e o salto.
 ;          MOVE_OBJECTS continua sendo a unica rotina que aplica velocidades.
 ;          OBJ_VY < 0 = subida; Y = topo e VY = 0 = topo; VY > 0 = descida.
-;          O topo conta o avanco nominal no mundo (1 pixel/quadro), mesmo
-;          sem seta horizontal ou na borda. Nao implementa scroll do terreno.
+;          O topo conta o deslocamento do terreno, mesmo sem seta horizontal.
+;          Move todas as naves, remove as que sairam e avanca o scroll.
 ; Entrada: AH = scan code ou 0; game_tab (primeiro registro = jipe), jump_top_left
-; Saida  : game_tab e jump_top_left atualizados (registradores preservados)
+; Saida  : objetos, salto e scroll atualizados (registradores preservados)
 ; Usa    : CX, DI; AX e usado por MOVE_OBJECTS (tambem preservado)
 ;------------------------------------------------------------------------------
 GAME_STEP PROC
@@ -1289,10 +1343,194 @@ gs_ground:
     mov  word ptr [di + OBJ_Y], JEEP_GAME_Y
     mov  word ptr [di + OBJ_VY], PARADO
 gs_done:
+    call SHIPS_STEP
+    add  [back_scroll], SCROLL_SPEED
+    cmp  [back_scroll], MOUNT_BACK_W
+    jb   gs_front
+    sub  [back_scroll], MOUNT_BACK_W
+gs_front:
+    add  [front_scroll], SCROLL_SPEED
+    cmp  [front_scroll], MOUNT_FRONT_W
+    jb   gs_end
+    sub  [front_scroll], MOUNT_FRONT_W
+gs_end:
     pop  di
     pop  cx
     ret
 GAME_STEP ENDP
+
+;------------------------------------------------------------------------------
+; RANDOM_RANGE
+; Funcao : avanca a semente de 16 bits e sorteia um valor em um intervalo
+; Entrada: CX = limite exclusivo, maior que zero; random_seed
+; Saida  : AX = 0 .. CX-1; semente atualizada; demais registradores preservados
+; Usa    : AX, BX, DX
+;------------------------------------------------------------------------------
+RANDOM_RANGE PROC
+    push bx
+    push dx
+    mov  ax, [random_seed]
+    mov  bx, RANDOM_MULT
+    mul  bx
+    add  ax, RANDOM_ADD
+    mov  [random_seed], ax
+    xor  dx, dx
+    div  cx
+    mov  ax, dx
+    pop  dx
+    pop  bx
+    ret
+RANDOM_RANGE ENDP
+
+;------------------------------------------------------------------------------
+; SHIPS_STEP
+; Funcao : desativa naves totalmente fora da tela; se nao sobrou nenhuma,
+;          sorteia um grupo do mesmo tipo. X inicial aleatorio na metade
+;          direita, com SHIP_GAP pixels livres; cada Y e sorteado separadamente.
+; Entrada: game_tab, random_seed (chamar depois de MOVE_OBJECTS)
+; Saida  : vagas das naves e semente atualizadas; registradores preservados
+; Usa    : AX, BX, CX, DX, SI, DI, BP
+;------------------------------------------------------------------------------
+SHIPS_STEP PROC
+    PUSH_ALL
+    mov  di, OFFSET game_tab + OBJ_TAM
+    mov  cx, SHIP_MAX_GROUP
+    xor  bx, bx                 ; quantidade ainda ativa
+ss_check:
+    cmp  word ptr [di + OBJ_ATIVO], INATIVO
+    je   ss_next
+    cmp  word ptr [di + OBJ_X], -SHIP_W
+    jg   ss_alive
+    mov  word ptr [di + OBJ_ATIVO], INATIVO
+    jmp  ss_next
+ss_alive:
+    inc  bx
+ss_next:
+    add  di, OBJ_TAM
+    loop ss_check
+    or   bx, bx
+    jnz  ss_done
+    mov  cx, SHIP_MAX_GROUP
+    call RANDOM_RANGE
+    inc  ax
+    mov  bp, ax                 ; quantidade do novo grupo
+    mov  cx, SHIP_TYPES
+    call RANDOM_RANGE
+    call SHIP_SPRITE            ; SI = bitmap comum a todas as naves
+    mov  ax, bp
+    dec  ax
+    mov  bx, SHIP_STEP_X
+    mul  bx                     ; espaco ocupado pelas separacoes
+    mov  cx, SHIP_MAX_X - SHIP_MIN_X + 1
+    sub  cx, ax                 ; garante que a ultima nave tambem caiba
+    call RANDOM_RANGE
+    add  ax, SHIP_MIN_X
+    mov  bx, ax                 ; X da primeira nave
+    mov  di, OFFSET game_tab + OBJ_TAM
+    mov  cx, bp
+ss_spawn:
+    mov  word ptr [di + OBJ_ATIVO], ATIVO
+    mov  [di + OBJ_X], bx
+    mov  word ptr [di + OBJ_LARG], SHIP_W
+    mov  word ptr [di + OBJ_ALT], SHIP_H
+    mov  word ptr [di + OBJ_VX], -SHIP_SPEED
+    mov  word ptr [di + OBJ_VY], PARADO
+    mov  [di + OBJ_SPRITE], si
+    push cx
+    mov  cx, SHIP_MAX_Y - SHIP_MIN_Y + 1
+    call RANDOM_RANGE
+    add  ax, SHIP_MIN_Y
+    mov  [di + OBJ_Y], ax
+    pop  cx
+    add  bx, SHIP_STEP_X
+    add  di, OBJ_TAM
+    loop ss_spawn
+ss_done:
+    POP_ALL
+    ret
+SHIPS_STEP ENDP
+
+;------------------------------------------------------------------------------
+; UPDATE_TIME
+; Funcao : acumula centesimos do relogio DOS, desconta segundos completos
+;          (inclusive se um quadro demorar mais de 1 s) e atualiza so o tempo.
+;          Corrige a virada do minuto; chamar ao menos uma vez por minuto.
+; Entrada: clock_last (CLOCK_UNSET para iniciar), clock_frac, time_left
+; Saida  : relogio e time_left atualizados, sem ficar negativo; registradores salvos
+; Usa    : AX, BX, CX, DX (INT 21h/2Ch); DRAW_TIME preserva os demais
+;------------------------------------------------------------------------------
+UPDATE_TIME PROC
+    PUSH_ALL
+    mov  ah, 2Ch
+    int  21h                    ; DH = segundos, DL = centesimos
+    mov  al, dh
+    mov  ah, CS_PER_SECOND
+    mul  ah
+    xor  dh, dh
+    add  ax, dx                 ; AX = centesimos dentro do minuto
+    mov  bx, ax
+    cmp  [clock_last], CLOCK_UNSET
+    je   ut_stamp
+    sub  ax, [clock_last]
+    jnc  ut_elapsed
+    add  ax, CS_PER_MINUTE
+ut_elapsed:
+    mov  [clock_last], bx
+    add  ax, [clock_frac]
+    xor  dx, dx
+    mov  bx, CS_PER_SECOND
+    div  bx                     ; AX = segundos completos, DX = fracao
+    mov  [clock_frac], dx
+    or   ax, ax
+    jz   ut_done
+    cmp  ax, [time_left]
+    jb   ut_sub
+    mov  ax, [time_left]         ; limita o desconto ao tempo restante
+ut_sub:
+    sub  [time_left], ax
+    call DRAW_TIME
+    jmp  ut_done
+ut_stamp:
+    mov  [clock_last], bx
+ut_done:
+    POP_ALL
+    ret
+UPDATE_TIME ENDP
+
+;------------------------------------------------------------------------------
+; GAME_OVER
+; Funcao : mostra GAME OVER vermelho em dois blocos ASCII e o score final;
+;          descarta teclas anteriores e espera qualquer tecla para voltar
+; Entrada: score
+; Saida  : nenhuma (registradores preservados)
+; Usa    : AX, BX, CX, DX, SI e as rotinas de texto existentes
+;------------------------------------------------------------------------------
+GAME_OVER PROC
+    PUSH_ALL
+    call CLEAR_SCREEN
+    mov  bl, COLOR_OVER
+    xor  al, al
+    mov  ah, TEXT_COLS
+    mov  si, OFFSET over_game
+    call CENTER_TEXT
+    mov  dh, OVER_ROW
+    mov  cx, OVER_LINES
+    call PRINT_BLOCK
+    mov  si, OFFSET over_over
+    call CENTER_TEXT
+    mov  dh, OVER_ROW + OVER_LINES + 1
+    call PRINT_BLOCK
+    mov  ax, [score]
+    mov  cx, SCORE_DIGITS
+    mov  dh, OVER_SCORE_ROW
+    mov  dl, SCORE_COL
+    mov  bl, COLOR_NORMAL
+    call PRINT_NUMBER
+    call FLUSH_KEYS
+    call WAIT_KEY
+    POP_ALL
+    ret
+GAME_OVER ENDP
 
 ;------------------------------------------------------------------------------
 ; DRAW_GAME_SCREEN
@@ -1302,23 +1540,27 @@ GAME_STEP ENDP
 ; Saida  : nenhuma
 ;------------------------------------------------------------------------------
 DRAW_GAME_SCREEN PROC
+    push bx
     push cx
     push di
     call CLEAR_SCREEN
     call DRAW_TERRAIN
+    mov  bx, TRACK_Y
+    call DRAW_GROUND            ; a pista e fixa: desenhada uma vez
     mov  di, OFFSET game_tab
     mov  cx, GAME_OBJS
     call DRAW_OBJECTS
     call DRAW_STATUS
     pop  di
     pop  cx
+    pop  bx
     ret
 DRAW_GAME_SCREEN ENDP
 
 ;------------------------------------------------------------------------------
 ; DRAW_TERRAIN
-; Funcao : desenha a montanha do fundo, a montanha da frente por cima dela
-;          e a pista
+; Funcao : recompoe montanhas e ceu: o fundo pinta suas transparencias de
+;          preto; a frente preserva o fundo, cobrindo o restante ate a pista.
 ; Entrada: [back_scroll], [front_scroll] = coluna de cada bitmap em x = 0
 ; Saida  : nenhuma
 ;------------------------------------------------------------------------------
@@ -1327,13 +1569,13 @@ DRAW_TERRAIN PROC
     mov  bx, OFFSET back_cols
     mov  ax, [back_scroll]
     mov  dx, MOUNT_BACK_Y
+    mov  cl, COLOR_BG
     call DRAW_RLE_LAYER
     mov  bx, OFFSET front_cols
     mov  ax, [front_scroll]
     mov  dx, MOUNT_FRONT_Y
+    mov  cl, TRANSPARENTE
     call DRAW_RLE_LAYER
-    mov  bx, TRACK_Y
-    call DRAW_GROUND            ; pista amarela
     POP_ALL
     ret
 DRAW_TERRAIN ENDP
@@ -1907,15 +2149,17 @@ CLEAR_SCREEN ENDP
 ;          estendida (largura + SCREEN_W entradas), entao a emenda do fim
 ;          com o inicio do bitmap sai sem nenhum teste.
 ;          Cada coluna RLE e uma lista de pares (quantidade, cor), de cima
-;          para baixo, terminada por 0; a cor TRANSPARENTE so pula linhas.
+;          para baixo, terminada por 0; CL define como tratar transparencias.
 ; Entrada: BX = tabela de colunas da camada (DW, offsets no DS),
 ;          AX = scroll (coluna do bitmap mostrada em x = 0; 0 .. largura-1),
-;          DX = linha do topo da camada
+;          DX = linha do topo da camada,
+;          CL = cor do ceu ou TRANSPARENTE para preservar a camada anterior
 ; Saida  : nenhuma
 ;------------------------------------------------------------------------------
 DRAW_RLE_LAYER PROC
     PUSH_ALL
     push es
+    push cx                     ; guarda a cor de reposicao das transparencias
     shl  ax, 1                  ; scroll * 2 (tabela de words)
     add  bx, ax                 ; BX = entrada da coluna mostrada em x = 0
     push bx
@@ -1926,6 +2170,8 @@ DRAW_RLE_LAYER PROC
     mov  bp, di                 ; BP = topo da coluna atual da tela
     mov  ax, VIDEO_SEG
     mov  es, ax
+    pop  ax
+    mov  ah, al                 ; AH = reposicao; LODSB altera somente AL
     cld
     mov  dx, SCREEN_W           ; DX = colunas da tela que faltam
 rl_col:
@@ -1939,7 +2185,10 @@ rl_run:
     xor  ch, ch                 ; CX = quantidade
     lodsb                       ; AL = cor
     cmp  al, TRANSPARENTE
+    jne  rl_pixel
+    cmp  ah, TRANSPARENTE
     je   rl_skip
+    mov  al, ah                 ; camada do fundo tambem restaura o ceu
 rl_pixel:
     mov  es:[di], al            ; enderecamento indireto via DI
     add  di, SCREEN_W           ; desce uma linha

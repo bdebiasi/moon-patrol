@@ -9,7 +9,7 @@
 ## Validacao
 - Verificar se o GUI Turbo Assembler esta disponivel. So afirmar que montou ou executou quando isso tiver sido observado; distinguir revisao estatica de teste de execucao.
 - Ao terminar cada parte, registrar os testes realizados e o que ainda precisa ser conferido no GUI Turbo Assembler.
-- Nesta etapa: montagem TASM 4.1 e vinculacao TLINK 7.1 sem erros/avisos, usando o DOSBox 0.74-3 fornecido pelo GUI Turbo Assembler. Testes temporarios em Assembly passaram para limites, salto completo (inclusive parado), movimento no ar, bloqueio de novo salto, registradores e comparacao dos pixels do terreno restaurado. Execucao visual confirmou menu, entrada no jogo, movimento horizontal e ESC de volta ao menu. A montagem foi feita pela linha de comando do emulador; repetir pela interface do IDE na apresentacao.
+- Nesta etapa: TASM 4.1 e TLINK 7.1 do GUI Turbo Assembler montaram/vincularam sem erros ou avisos no DOSBox 0.74-3. Testes temporarios em Assembly verificaram 256 grupos, tipos/quantidades, limites/espacamentos, remocao e reposicao, movimento/salto, registradores, comparacao de pixels do terreno e os dois motivos de Game Over. O relogio passou por testes de centesimos, virada do minuto, desconto de varios segundos e espera real de 2 segundos. Execucao visual confirmou scroll, naves, contagem normal de 60 segundos, Game Over, retorno ao menu por uma tecla, movimento do jipe e ESC durante a partida. Montagem pela linha de comando das ferramentas da instalacao; repetir pela interface do IDE na apresentacao.
 
 ## Regras obrigatorias
 
@@ -189,39 +189,43 @@ Os bitmaps oficiais sao imagens no enunciado (Figuras 5, 6, 7, 10, 11, 12). Ao t
 - **Pausa entre frames:** `INT 15h/86h`, com CX:DX = microssegundos (ex.: 30 ms → CX = 0, DX = 7530h).
 - **Teclado sem esperar:** `INT 16h/01h` (ZF = 1 significa buffer vazio); depois `INT 16h/00h` para ler e remover a tecla.
 - **Relogio de 1 s:** `INT 21h/2Ch` (segundos em DH; atualizar quando o valor mudar).
-- **Aleatoriedade:** LCG de 16 bits proprio (ex.: semente = semente*25173 + 13849), semeado com o tick de `INT 1Ah/00h` (DX).
+- **Aleatoriedade:** `RANDOM_RANGE` usa LCG de 16 bits (semente = semente*25173 + 13849), semeado pelos centesimos do relogio DOS ao iniciar a partida.
 - **Tamanho de bloco em tempo de montagem:** `TAM EQU $ - rotulo`.
 
 Nao inventar funcoes de interrupcao: usar so o que esta documentado nos PDFs.
 
 ## Minimo entregavel (sem isso o trabalho nao e avaliado)
-- [ ] Tela inicial completa e funcional
-- [ ] Barra de status completa
-- [ ] Geracao aleatoria de grupos de naves, movimento e remocao a esquerda (tiros das naves sao opcionais)
-- [ ] Scroll continuo do terreno com recomposicao pela direita
+- [x] Tela inicial completa e funcional
+- [x] Barra de status completa
+- [x] Geracao aleatoria de grupos de naves, movimento e remocao a esquerda (tiros das naves sao opcionais)
+- [x] Scroll continuo do terreno com recomposicao pela direita
 - [x] Movimento horizontal na metade esquerda e salto com seta para cima
 - [ ] Jipe some ao atingir cratera ou rocha, e as vidas sao atualizadas
 - [ ] Pontuacao correta
 - [ ] Crateras e rochas conforme as regras
-- [ ] Game Over por vidas ou tempo, com placar; tecla volta ao menu
+- [x] Game Over por vidas ou tempo, com placar; tecla volta ao menu
 - [ ] Constantes para todas as definicoes
 - [ ] Cabecalho em todas as rotinas
 
-**Especificacao completa e minimo avaliavel:** os tiros do jipe e das naves estao descritos nas secoes de requisitos, mas sao explicitamente dispensados no Minimo Entregavel (p. 14). Sao opcionais para esse minimo e contam como pontuacao complementar; elementos extras, como parallax, tambem sao complementares. Os demais itens da lista acima continuam obrigatorios. Esta etapa implementa somente movimento/salto, sem completar o minimo do trabalho.
+**Especificacao completa e minimo avaliavel:** os tiros do jipe e das naves estao descritos nas secoes de requisitos, mas sao explicitamente dispensados no Minimo Entregavel (p. 14). Sao opcionais para esse minimo e contam como pontuacao complementar; elementos extras, como parallax, tambem sao complementares. Os demais itens da lista acima continuam obrigatorios. Esta etapa inclui movimento/salto, scroll, naves, tempo e Game Over; ainda faltam obstaculos, colisoes e pontuacao para completar o minimo.
 
 ## Ambiguidades do enunciado (deixar parametrizado)
-- "5 px de deslocamento horizontal" no topo: nesta etapa contam-se 5 pixels de avanco nominal no mundo, a `JUMP_WORLD_VX = 1` pixel/quadro (5 intervalos no topo). O contador independe das setas e das bordas para que o salto termine mesmo parado. Ainda nao ha scroll; quando ele for implementado, usar o mesmo avanco para o contador.
+- "5 px de deslocamento horizontal" no topo: o contador acompanha o deslocamento real do terreno (`JUMP_WORLD_VX = SCROLL_SPEED`), mesmo quando o jipe esta parado na tela ou na borda. A interpretacao adotada e o avanco do jipe em relacao ao mundo, representado pelo scroll.
 - Linhas exatas das montanhas e da pista (100 + 95 = 195 ultrapassa o topo da pista em 193).
 - Criterio exato de queda na cratera (quanto do jipe precisa estar sobre ela).
 - Tamanho do tiro superior do jipe.
 
 ## Estado implementado nesta etapa
-- Menu e sprites preservados. `GAME_RUN` le uma tecla sem bloquear por quadro, apaga objetos antigos, chama `GAME_STEP`, restaura `DRAW_TERRAIN`, redesenha `DRAW_OBJECTS` e chama `WAIT_FRAME`. ESC retorna ao menu.
+- Menu e sprites preservados. `GAME_RUN` atualiza o relogio, verifica tempo/vidas, le uma tecla sem bloquear, apaga objetos antigos, chama `GAME_STEP`, restaura `DRAW_TERRAIN`, redesenha `DRAW_OBJECTS` e chama `WAIT_FRAME`. ESC retorna ao menu.
 - `GAME_STEP` define VX pelas setas (2 pixels por evento de tecla), chama `MOVE_OBJECTS` e limita X a 0..140, mantendo o sprite inteiro nas colunas 0..159.
 - Salto: Y vai de 183 a 168 e volta em passos de 3; `OBJ_VY` e a altura indicam a etapa. Apenas `jump_top_left` foi acrescentada ao estado, sem novo salto no ar.
 - Leitura BIOS preservada: teclas seguradas dependem da repeticao automatica, sem leitura simultanea de teclas. As setas horizontais funcionam durante todas as etapas do salto.
 - Redesenho usa as rotinas existentes, sem buffer adicional. As rotinas de sprite/retangulo recortam somente na horizontal: os chamadores devem garantir `0 <= Y` e `Y + altura <= SCREEN_H`. O jipe fica em Y=168..183 (ultima linha 192); objetos do menu tambem ficam dentro da tela.
-- Scroll, inimigos, obstaculos, colisoes, tiros, contagem regressiva e Game Over continuam pendentes.
+- Scroll: ambas as camadas avancam `SCROLL_SPEED` pixels por quadro. Os tiles RLE existentes de 256 colunas se repetem para preencher os 320 pixels da tela; as tabelas estendidas unem fim/inicio. `DRAW_TERRAIN` restaura o ceu nas transparencias da camada do fundo (`CL=COLOR_BG`); na frente, `CL=TRANSPARENTE` preserva a camada anterior. A frente so tem transparencia ate a linha 162, ja coberta pelo fundo (100..163), portanto toda a faixa e recomposta sem limpeza separada. A pista fixa e desenhada uma vez em `DRAW_GAME_SCREEN`.
+- Naves: `game_tab` contem o jipe e 3 vagas. `SHIPS_STEP` desativa X <= -14 e so gera outro grupo quando todas sairam. Sorteia quantidade 1..3, tipo comum e X inicial que acomoda o grupo inteiro em 160..306; as demais posicoes seguem a separacao de 44 pixels (30 livres). Cada Y e sorteado em 15..86. `MOVE_OBJECTS` move todas, com VX=-1 e VY=0.
+- Tempo: `UPDATE_TIME` usa `INT 21h/2Ch`, acumula centesimos e desconta segundos completos, inclusive quadros demorados e virada do minuto. Deve ser chamada ao menos uma vez por minuto. So redesenha o tempo quando ha desconto.
+- `GAME_OVER` reutiliza texto centralizado/ASCII em dois blocos vermelhos, imprime o score final e espera uma nova tecla. O laco encerra por tempo ou vidas zerados.
+- Pendentes: crateras, rochas, colisoes, perda/retorno de vidas e pontuacao por acoes; disparos continuam opcionais para o minimo.
 
 ## Documentos de referencia (`conteudo-trabalho-arquitetura/`)
 - `PDF-trabalho-a-ser-feito.pdf`: especificacao do TDE (fonte da verdade).
