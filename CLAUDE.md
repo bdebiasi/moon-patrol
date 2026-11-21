@@ -9,7 +9,7 @@
 ## Validacao
 - Verificar se o GUI Turbo Assembler esta disponivel. So afirmar que montou ou executou quando isso tiver sido observado; distinguir revisao estatica de teste de execucao.
 - Ao terminar cada parte, registrar os testes realizados e o que ainda precisa ser conferido no GUI Turbo Assembler.
-- Nesta etapa: TASM 4.1 e TLINK 7.1 do GUI Turbo Assembler montaram/vincularam sem erros ou avisos no DOSBox 0.74-3. Testes temporarios em Assembly verificaram 256 grupos, tipos/quantidades, limites/espacamentos, remocao e reposicao, movimento/salto, registradores, comparacao de pixels do terreno e os dois motivos de Game Over. O relogio passou por testes de centesimos, virada do minuto, desconto de varios segundos e espera real de 2 segundos. Execucao visual confirmou scroll, naves, contagem normal de 60 segundos, Game Over, retorno ao menu por uma tecla, movimento do jipe e ESC durante a partida. Montagem pela linha de comando das ferramentas da instalacao; repetir pela interface do IDE na apresentacao.
+- Etapa 4: TASM 4.1/TLINK 7.1 do GUI Turbo Assembler montaram/vincularam sem erros ou avisos no DOSBox 0.74-3. Testes temporarios em Assembly passaram para 1024 geracoes de pares, os sete tipos, 4000 quadros de geracao/scroll, espacamentos, bordas de colisao, salto completo sobre cada tipo, perda unica de vida, reposicao, pontos unicos, reciclagem, registradores, comparacao dos pixels da pista/montanhas/status e acionamento do Game Over por vidas zeradas. Conferencia visual executada do menu/partida e, em roteiro temporario, dos sete sprites, salto com +50, coracoes apos colisao e Game Over preservando o placar. Montagem pela linha de comando das ferramentas da instalacao; repetir pela interface do IDE na apresentacao.
 
 ## Regras obrigatorias
 
@@ -200,32 +200,37 @@ Nao inventar funcoes de interrupcao: usar so o que esta documentado nos PDFs.
 - [x] Geracao aleatoria de grupos de naves, movimento e remocao a esquerda (tiros das naves sao opcionais)
 - [x] Scroll continuo do terreno com recomposicao pela direita
 - [x] Movimento horizontal na metade esquerda e salto com seta para cima
-- [ ] Jipe some ao atingir cratera ou rocha, e as vidas sao atualizadas
-- [ ] Pontuacao correta
-- [ ] Crateras e rochas conforme as regras
+- [x] Colisao com cratera/rocha reduz uma vida e recoloca o jipe em X=0
+- [x] Pontuacao por obstaculo superado, concedida uma unica vez
+- [x] Crateras e rochas conforme as regras (resistencias identificadas por tipo; tiros opcionais pendentes)
 - [x] Game Over por vidas ou tempo, com placar; tecla volta ao menu
-- [ ] Constantes para todas as definicoes
-- [ ] Cabecalho em todas as rotinas
+- [x] Constantes para as definicoes implementadas
+- [x] Cabecalho em todas as rotinas
 
-**Especificacao completa e minimo avaliavel:** os tiros do jipe e das naves estao descritos nas secoes de requisitos, mas sao explicitamente dispensados no Minimo Entregavel (p. 14). Sao opcionais para esse minimo e contam como pontuacao complementar; elementos extras, como parallax, tambem sao complementares. Os demais itens da lista acima continuam obrigatorios. Esta etapa inclui movimento/salto, scroll, naves, tempo e Game Over; ainda faltam obstaculos, colisoes e pontuacao para completar o minimo.
+**Especificacao completa e minimo avaliavel:** os tiros do jipe e das naves estao descritos nas secoes de requisitos, mas sao explicitamente dispensados no Minimo Entregavel (p. 14). Sao opcionais para esse minimo e contam como pontuacao complementar; elementos extras, como parallax, tambem sao complementares. Os demais itens da lista acima continuam obrigatorios. A etapa 4 acrescenta obstaculos, colisoes, perda de vidas e pontuacao ao minimo implementado. Os tiros e as resistencias a disparos ainda nao foram implementados.
 
 ## Ambiguidades do enunciado (deixar parametrizado)
 - "5 px de deslocamento horizontal" no topo: o contador acompanha o deslocamento real do terreno (`JUMP_WORLD_VX = SCROLL_SPEED`), mesmo quando o jipe esta parado na tela ou na borda. A interpretacao adotada e o avanco do jipe em relacao ao mundo, representado pelo scroll.
 - Linhas exatas das montanhas e da pista (100 + 95 = 195 ultrapassa o topo da pista em 193).
-- Criterio exato de queda na cratera (quanto do jipe precisa estar sobre ela).
+- Crateras: qualquer sobreposicao horizontal com o retangulo do jipe, quando seus pneus tocam a linha da pista, conta como queda. `RECT_HIT` recebe extensao inferior de 1 pixel para incluir esse contato; no ar nao ha queda. Rochas usam os retangulos completos, sem extensao.
 - Tamanho do tiro superior do jipe.
 
 ## Estado implementado nesta etapa
 - Menu e sprites preservados. `GAME_RUN` atualiza o relogio, verifica tempo/vidas, le uma tecla sem bloquear, apaga objetos antigos, chama `GAME_STEP`, restaura `DRAW_TERRAIN`, redesenha `DRAW_OBJECTS` e chama `WAIT_FRAME`. ESC retorna ao menu.
-- `GAME_STEP` define VX pelas setas (2 pixels por evento de tecla), chama `MOVE_OBJECTS` e limita X a 0..140, mantendo o sprite inteiro nas colunas 0..159.
+- `GAME_STEP` define VX pelas setas (6 pixels por evento de tecla), chama `MOVE_OBJECTS` para todos os objetos e limita o jipe a X=0..140. A partida usa `GAME_FRAME_US=60000`; o menu mantem 14000. Ajustes autorizados para permitir transpor as rochas com colisao retangular completa, preservando altura e passos verticais do salto. Saltar e avancar para a direita permite a travessia; a leitura BIOS continua dependente da repeticao das setas.
 - Salto: Y vai de 183 a 168 e volta em passos de 3; `OBJ_VY` e a altura indicam a etapa. Apenas `jump_top_left` foi acrescentada ao estado, sem novo salto no ar.
 - Leitura BIOS preservada: teclas seguradas dependem da repeticao automatica, sem leitura simultanea de teclas. As setas horizontais funcionam durante todas as etapas do salto.
 - Redesenho usa as rotinas existentes, sem buffer adicional. As rotinas de sprite/retangulo recortam somente na horizontal: os chamadores devem garantir `0 <= Y` e `Y + altura <= SCREEN_H`. O jipe fica em Y=168..183 (ultima linha 192); objetos do menu tambem ficam dentro da tela.
-- Scroll: ambas as camadas avancam `SCROLL_SPEED` pixels por quadro. Os tiles RLE existentes de 256 colunas se repetem para preencher os 320 pixels da tela; as tabelas estendidas unem fim/inicio. `DRAW_TERRAIN` restaura o ceu nas transparencias da camada do fundo (`CL=COLOR_BG`); na frente, `CL=TRANSPARENTE` preserva a camada anterior. A frente so tem transparencia ate a linha 162, ja coberta pelo fundo (100..163), portanto toda a faixa e recomposta sem limpeza separada. A pista fixa e desenhada uma vez em `DRAW_GAME_SCREEN`.
-- Naves: `game_tab` contem o jipe e 3 vagas. `SHIPS_STEP` desativa X <= -14 e so gera outro grupo quando todas sairam. Sorteia quantidade 1..3, tipo comum e X inicial que acomoda o grupo inteiro em 160..306; as demais posicoes seguem a separacao de 44 pixels (30 livres). Cada Y e sorteado em 15..86. `MOVE_OBJECTS` move todas, com VX=-1 e VY=0.
+- Scroll: ambas as camadas avancam `SCROLL_SPEED` pixels por quadro. Os tiles RLE existentes de 256 colunas se repetem para preencher os 320 pixels da tela; as tabelas estendidas unem fim/inicio. `DRAW_TERRAIN` restaura o ceu nas transparencias da camada do fundo (`CL=COLOR_BG`); na frente, `CL=TRANSPARENTE` preserva a camada anterior. A frente so tem transparencia ate a linha 162, ja coberta pelo fundo (100..163), portanto toda a faixa e recomposta sem limpeza separada. A pista e recomposta por `DRAW_GROUND` dentro de `DRAW_TERRAIN` a cada quadro, antes dos objetos, para apagar crateras sem rastros.
+- Naves: `game_tab` contem o jipe, 3 vagas de naves e 4 vagas de obstaculos. `SHIPS_STEP` desativa X <= -14 e so gera outro grupo quando todas sairam. Sorteia quantidade 1..3, tipo comum e X inicial que acomoda o grupo inteiro em 160..306; as demais posicoes seguem a separacao de 44 pixels (30 livres). Cada Y e sorteado em 15..86. `MOVE_OBJECTS` move todas, com VX=-1 e VY=0.
 - Tempo: `UPDATE_TIME` usa `INT 21h/2Ch`, acumula centesimos e desconta segundos completos, inclusive quadros demorados e virada do minuto. Deve ser chamada ao menos uma vez por minuto. So redesenha o tempo quando ha desconto.
 - `GAME_OVER` reutiliza texto centralizado/ASCII em dois blocos vermelhos, imprime o score final e espera uma nova tecla. O laco encerra por tempo ou vidas zerados.
-- Pendentes: crateras, rochas, colisoes, perda/retorno de vidas e pontuacao por acoes; disparos continuam opcionais para o minimo.
+- Obstaculos: dois pares cratera/rocha reutilizam os mesmos registros e rotinas graficas/de movimento. As crateras tem 14x7, as rochas 12x10; os sete bitmaps seguem as Figuras 11/12. O interior da cratera e preto, representando o buraco; o exterior das rochas e transparente.
+- `OBSTACLES_STEP` recicla o par quando ambos sairam totalmente. Gera a cratera em X >= 320, com pelo menos 150 pixels livres apos a ultima, mais variacao aleatoria. A rocha fica na faixa entre essa cratera e a proxima, com margens de 40 pixels. Os obstaculos andam com VX=-SCROLL_SPEED.
+- Registros agora tem 20 bytes: `OBJ_TIPO` identifica crateras 1..3 e rochas 4..7; `OBJ_RESOLVIDO=1` indica que o obstaculo ja rendeu pontos ou causou perda de vida. O resultado nao se repete, inclusive ao voltar sobre um obstaculo, ate a vaga ser reciclada. Tipos de rocha preservam a futura resistencia, sem implementar tiros/HP nesta etapa.
+- `RECT_HIT` e generica para dois retangulos. Colisao resolve o obstaculo, desconta uma vida, atualiza coracoes, copia somente o registro inicial do jipe e zera o contador do salto. O Game Over existente atende vidas zeradas. Passar completamente pelo obstaculo sem colidir concede 50 pontos e atualiza o score; o placar final e preservado.
+- `RANDOM_RANGE` mistura os bytes da semente antes de obter o resto, evitando repeticoes dos bits baixos em sorteios de quatro tipos.
+- Pendentes: disparos frontal/superior do jipe e das naves, resistencias das rochas aos tiros e colisoes/pontuacao envolvendo projeteis (opcionais para o minimo). Conferir a entrega final pela interface do GUI Turbo Assembler.
 
 ## Documentos de referencia (`conteudo-trabalho-arquitetura/`)
 - `PDF-trabalho-a-ser-feito.pdf`: especificacao do TDE (fonte da verdade).

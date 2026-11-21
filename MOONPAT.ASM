@@ -81,12 +81,15 @@ OBJ_ALT         EQU 8           ; altura em pixels
 OBJ_VX          EQU 10          ; velocidade horizontal (pixels/quadro)
 OBJ_VY          EQU 12          ; velocidade vertical (pixels/quadro)
 OBJ_SPRITE      EQU 14          ; offset do bitmap no DS
-OBJ_TAM         EQU 16          ; bytes de cada registro
+OBJ_TIPO        EQU 16          ; obstaculos: crateras 1..3, rochas 4..7
+OBJ_RESOLVIDO   EQU 18          ; 1 = ja pontuou ou causou perda de vida
+OBJ_TAM         EQU 20          ; bytes de cada registro
 ATIVO           EQU 1
 INATIVO         EQU 0
 
 ; --- Animacao da tela inicial ---
 FRAME_DELAY_US  EQU 14000       ; duracao de um quadro em microssegundos
+GAME_FRAME_US   EQU 60000       ; tempo para reagir e repetir as setas na partida
 ANIM_SHIPS      EQU 3           ; naves na animacao
 ANIM_SHIP_VX    EQU 1           ; naves: pixels por quadro (esq. -> dir.)
 ANIM_JEEP_VX    EQU 1           ; jipe: pixels por quadro (esq. -> dir.)
@@ -140,6 +143,25 @@ SHIP_MAX_Y      EQU MOUNT_TOP_Y - SHIP_H
 RANDOM_MULT     EQU 25173       ; gerador congruente de 16 bits
 RANDOM_ADD      EQU 13849
 
+; --- Obstaculos (pares cratera/rocha, na mesma tabela de objetos) ---
+CRATER_W        EQU 14
+CRATER_H        EQU 7
+CRATER_TYPES    EQU 3
+CRATER_MIN_GAP  EQU 150         ; pixels livres entre crateras consecutivas
+ROCK_W          EQU 12
+ROCK_H          EQU 10
+ROCK_TYPES      EQU 4           ; tipos 1..4 preservados como OBJ_TIPO 4..7
+ROCK_MARGIN     EQU 40          ; espaco livre de cada lado da rocha
+OBST_PAIRS      EQU 2
+OBST_OBJS       EQU 2 * OBST_PAIRS
+OBST_FIRST      EQU (1 + SHIP_MAX_GROUP) * OBJ_TAM
+OBST_GAP_RANDOM EQU 64          ; variacao adicional no espacamento das crateras
+OBST_POINTS     EQU 50
+COLOR_CRATER    EQU 2Ah         ; borda laranja
+COLOR_CRATER_DARK EQU 0A2h      ; marrom da borda interna
+COLOR_EARTH     EQU 73h         ; marrom das rochas
+COLOR_ROCK_DARK EQU 0BBh        ; sombra marrom-escura
+
 ; --- Relogio e fim de jogo ---
 CS_PER_SECOND   EQU 100
 CS_PER_MINUTE   EQU 60 * CS_PER_SECOND
@@ -179,7 +201,7 @@ GAME_TIME       EQU 60          ; duracao da partida em segundos (<= 99)
 PARADO          EQU 0           ; velocidade nula
 JEEP_START_X    EQU 0           ; coluna em que o jipe nasce/renasce
 JEEP_GAME_Y     EQU TRACK_Y - JEEP_H                ; jipe no chao
-JEEP_SPEED      EQU 2           ; pixels por tecla/quadro (maior que ANIM_SHIP_VX)
+JEEP_SPEED      EQU 6           ; permite transpor a rocha durante o salto curto
 JEEP_MIN_X      EQU 0
 JEEP_MAX_X      EQU SCREEN_W / 2 - JEEP_W    ; sprite inteiro na metade esquerda
 JUMP_HEIGHT     EQU 15          ; altura maxima acima do chao
@@ -263,6 +285,7 @@ jump_top_left   DW 0                            ; pixels restantes no topo
 clock_last      DW CLOCK_UNSET                  ; centesimos dentro do minuto
 clock_frac      DW 0                            ; fracao de segundo acumulada
 random_seed     DW 0
+last_crater_x   DW 0                            ; X da ultima cratera gerada
 num_buf         DB NUM_MAX_DIGITS + 1 DUP (0)   ; digitos + 0 final
 
 ; Sprites: 1 byte por pixel (cor), linha a linha. 0FFh = transparente.
@@ -327,16 +350,89 @@ spr_ship3   DB 0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,
             DB 0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh
             DB 0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh
 
+; Obstaculos das Figuras 11 e 12: 1 byte/pixel, linhas consecutivas.
+; Nas crateras, o interior e preto; nas rochas, o exterior e transparente.
+spr_crater1   DB COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER_DARK
+              DB COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+
+spr_crater2   DB COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER_DARK
+              DB COLOR_CRATER,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+
+spr_crater3   DB COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER_DARK
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+
+spr_rock1     DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+
+spr_rock2     DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,TRANSPARENTE,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE
+              DB COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE
+              DB COLOR_EARTH,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE
+
+spr_rock3     DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE
+              DB COLOR_ROCK_DARK,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE
+
+spr_rock4     DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE
+              DB TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE
+              DB TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK
+              DB COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH
+
+obst_ptrs      DW OFFSET spr_crater1, OFFSET spr_crater2, OFFSET spr_crater3
+               DW OFFSET spr_rock1, OFFSET spr_rock2, OFFSET spr_rock3, OFFSET spr_rock4
+
 ; Tabela inicial da animacao: copiada para anim_tab sempre que o menu abre.
-; Campos de cada registro: ATIVO, X, Y, LARG, ALT, VX, VY, SPRITE
+; Campos: ATIVO, X, Y, LARG, ALT, VX, VY, SPRITE, TIPO, RESOLVIDO
 anim_tab0   DW ATIVO, ANIM_SHIP_X0, ANIM_SHIP_Y
-            DW SHIP_W, SHIP_H, ANIM_SHIP_VX, ANIM_VY, OFFSET spr_ship1
+            DW SHIP_W, SHIP_H, ANIM_SHIP_VX, ANIM_VY, OFFSET spr_ship1, 0, 0
             DW ATIVO, ANIM_SHIP_X0 + ANIM_SHIP_DX, ANIM_SHIP_Y + ANIM_SHIP_DY
-            DW SHIP_W, SHIP_H, ANIM_SHIP_VX, ANIM_VY, OFFSET spr_ship2
+            DW SHIP_W, SHIP_H, ANIM_SHIP_VX, ANIM_VY, OFFSET spr_ship2, 0, 0
             DW ATIVO, ANIM_SHIP_X0 + 2 * ANIM_SHIP_DX, ANIM_SHIP_Y
-            DW SHIP_W, SHIP_H, ANIM_SHIP_VX, ANIM_VY, OFFSET spr_ship3
+            DW SHIP_W, SHIP_H, ANIM_SHIP_VX, ANIM_VY, OFFSET spr_ship3, 0, 0
             DW ATIVO, JEEP_X0, MENU_JEEP_Y
-            DW JEEP_W, JEEP_H, ANIM_JEEP_VX, ANIM_VY, OFFSET spr_jeep
+            DW JEEP_W, JEEP_H, ANIM_JEEP_VX, ANIM_VY, OFFSET spr_jeep, 0, 0
 ANIM_TAB_BYTES  EQU $ - anim_tab0
 ANIM_OBJS       EQU ANIM_TAB_BYTES / OBJ_TAM    ; naves + jipe
 
@@ -1113,15 +1209,21 @@ spr_clock   DB 0FFh,0FFh,0Eh,0Eh,0Eh,0FFh,0FFh
 heart_ptrs  DW OFFSET spr_heart1, OFFSET spr_heart2, OFFSET spr_heart3
 heart_ws    DW HEART1_W, HEART2_W, HEART3_W
 
-; Tabela inicial dos objetos do jogo: jipe seguido das vagas para naves.
-; Campos de cada registro: ATIVO, X, Y, LARG, ALT, VX, VY, SPRITE
+; Tabela: jipe, vagas das naves, pares cratera/rocha.
+; Campos: ATIVO, X, Y, LARG, ALT, VX, VY, SPRITE, TIPO, RESOLVIDO
 game_tab0   DW ATIVO, JEEP_START_X, JEEP_GAME_Y
-            DW JEEP_W, JEEP_H, PARADO, PARADO, OFFSET spr_jeep
-            DW SHIP_MAX_GROUP * (OBJ_TAM / WORD_BYTES) DUP (0)
+            DW JEEP_W, JEEP_H, PARADO, PARADO, OFFSET spr_jeep, 0, 0
+            DW (SHIP_MAX_GROUP + OBST_OBJS) * (OBJ_TAM / WORD_BYTES) DUP (0)
 GAME_TAB_BYTES  EQU $ - game_tab0
 GAME_OBJS       EQU GAME_TAB_BYTES / OBJ_TAM
 
 game_tab    DB GAME_TAB_BYTES DUP (?)           ; estado atual dos objetos
+
+; Molde de um par. O tipo e o sprite sao sorteados ao ocupar a vaga.
+obst_tab0   DW ATIVO, 0, TRACK_Y, CRATER_W, CRATER_H
+            DW -SCROLL_SPEED, PARADO, 0, 0, 0
+            DW ATIVO, 0, TRACK_Y - ROCK_H, ROCK_W, ROCK_H
+            DW -SCROLL_SPEED, PARADO, 0, 0, 0
 
 ;==============================================================================
 ; CODIGO
@@ -1172,6 +1274,7 @@ MENU_RUN PROC
     call DRAW_MENU
     call FLUSH_KEYS
 mr_frame:
+    mov  ax, FRAME_DELAY_US
     call WAIT_FRAME
     call ANIM_STEP
     call GET_KEY_NB             ; AX = tecla ou 0
@@ -1234,6 +1337,7 @@ gr_frame:
     call GAME_STEP
     call DRAW_TERRAIN           ; recompoe montanhas e pista apagadas
     call DRAW_OBJECTS
+    mov  ax, GAME_FRAME_US
     call WAIT_FRAME
     jmp  gr_frame
 gr_over:
@@ -1262,6 +1366,7 @@ GAME_INIT PROC
     mov  [back_scroll], SCROLL_START
     mov  [front_scroll], SCROLL_START
     mov  [jump_top_left], 0
+    mov  [last_crater_x], SCREEN_W - CRATER_W - CRATER_MIN_GAP
     mov  [clock_last], CLOCK_UNSET
     mov  [clock_frac], 0
     call UPDATE_TIME            ; apenas registra o instante inicial
@@ -1272,6 +1377,7 @@ GAME_INIT PROC
     mov  cx, GAME_TAB_BYTES
     call COPY_BYTES
     call SHIPS_STEP
+    call OBSTACLES_STEP
     pop  di
     pop  si
     pop  cx
@@ -1285,9 +1391,9 @@ GAME_INIT ENDP
 ;          MOVE_OBJECTS continua sendo a unica rotina que aplica velocidades.
 ;          OBJ_VY < 0 = subida; Y = topo e VY = 0 = topo; VY > 0 = descida.
 ;          O topo conta o deslocamento do terreno, mesmo sem seta horizontal.
-;          Move todas as naves, remove as que sairam e avanca o scroll.
-; Entrada: AH = scan code ou 0; game_tab (primeiro registro = jipe), jump_top_left
-; Saida  : objetos, salto e scroll atualizados (registradores preservados)
+;          Move naves/obstaculos, resolve colisoes/pontos e avanca o scroll.
+; Entrada: AH = scan code ou 0; game_tab e variaveis da partida
+; Saida  : objetos, salto, scroll, score e vidas atualizados (registradores salvos)
 ; Usa    : CX, DI; AX e usado por MOVE_OBJECTS (tambem preservado)
 ;------------------------------------------------------------------------------
 GAME_STEP PROC
@@ -1354,6 +1460,8 @@ gs_front:
     jb   gs_end
     sub  [front_scroll], MOUNT_FRONT_W
 gs_end:
+    sub  [last_crater_x], SCROLL_SPEED
+    call OBSTACLES_STEP
     pop  di
     pop  cx
     ret
@@ -1374,6 +1482,7 @@ RANDOM_RANGE PROC
     mul  bx
     add  ax, RANDOM_ADD
     mov  [random_seed], ax
+    xor  al, ah                 ; mistura os bytes para sorteios de 2/4 tipos
     xor  dx, dx
     div  cx
     mov  ax, dx
@@ -1449,6 +1558,149 @@ ss_done:
     POP_ALL
     ret
 SHIPS_STEP ENDP
+
+;------------------------------------------------------------------------------
+; RECT_HIT
+; Funcao : testa sobreposicao retangular; bordas apenas encostadas nao colidem
+; Entrada: SI, DI = objetos no DS; DX = extensao inferior do primeiro retangulo
+;          (0 normalmente; 1 para detectar pneus apoiados na borda da cratera)
+; Saida  : CF = 1 se colidem, 0 caso contrario; registradores preservados
+; Usa    : AX, BX
+;------------------------------------------------------------------------------
+RECT_HIT PROC
+    push ax
+    push bx
+    mov  ax, [si + OBJ_X]
+    mov  bx, [di + OBJ_X]
+    add  ax, [si + OBJ_LARG]
+    cmp  ax, bx
+    jle  rh_no
+    add  bx, [di + OBJ_LARG]
+    cmp  bx, [si + OBJ_X]
+    jle  rh_no
+    mov  ax, [si + OBJ_Y]
+    add  ax, [si + OBJ_ALT]
+    add  ax, dx
+    cmp  ax, [di + OBJ_Y]
+    jle  rh_no
+    mov  bx, [di + OBJ_Y]
+    add  bx, [di + OBJ_ALT]
+    cmp  bx, [si + OBJ_Y]
+    jle  rh_no
+    stc
+    jmp  rh_done
+rh_no:
+    clc
+rh_done:
+    pop  bx
+    pop  ax
+    ret
+RECT_HIT ENDP
+
+;------------------------------------------------------------------------------
+; OBSTACLES_STEP
+; Funcao : ocupa pares livres com cratera e rocha aleatorias, testa colisao,
+;          pontua ao passar completamente e remove objetos fora da tela.
+;          RESOLVIDO evita repetir pontos ou penalidades ate reciclar a vaga.
+; Entrada: game_tab, last_crater_x, random_seed, score, lives, jump_top_left
+; Saida  : estado e barra atualizados; colisao recoloca o jipe em X=0, no chao
+; Usa    : AX, BX, CX, DX, SI, DI, BP (todos preservados)
+;------------------------------------------------------------------------------
+OBSTACLES_STEP PROC
+    PUSH_ALL
+    mov  di, OFFSET game_tab + OBST_FIRST
+    mov  bp, OBST_PAIRS
+ob_pair:
+    cmp  word ptr [di + OBJ_ATIVO], INATIVO
+    jne  ob_pair_next
+    cmp  word ptr [di + OBJ_TAM + OBJ_ATIVO], INATIVO
+    jne  ob_pair_next
+    mov  si, OFFSET obst_tab0
+    mov  cx, 2 * OBJ_TAM
+    call COPY_BYTES
+    mov  cx, OBST_GAP_RANDOM
+    call RANDOM_RANGE
+    add  ax, [last_crater_x]
+    add  ax, CRATER_W + CRATER_MIN_GAP
+    cmp  ax, SCREEN_W
+    jge  ob_crater_x
+    mov  ax, SCREEN_W
+ob_crater_x:
+    mov  [last_crater_x], ax
+    mov  [di + OBJ_X], ax
+    mov  cx, CRATER_MIN_GAP - ROCK_W - 2 * ROCK_MARGIN + 1
+    call RANDOM_RANGE
+    add  ax, [di + OBJ_X]
+    add  ax, CRATER_W + ROCK_MARGIN
+    mov  [di + OBJ_TAM + OBJ_X], ax
+    mov  cx, CRATER_TYPES
+    call RANDOM_RANGE
+    mov  si, ax
+    shl  si, 1
+    mov  si, [obst_ptrs + si]
+    mov  [di + OBJ_SPRITE], si
+    inc  ax
+    mov  [di + OBJ_TIPO], ax
+    mov  cx, ROCK_TYPES
+    call RANDOM_RANGE
+    add  ax, CRATER_TYPES
+    mov  si, ax
+    shl  si, 1
+    mov  si, [obst_ptrs + si]
+    mov  [di + OBJ_TAM + OBJ_SPRITE], si
+    inc  ax
+    mov  [di + OBJ_TAM + OBJ_TIPO], ax
+ob_pair_next:
+    add  di, 2 * OBJ_TAM
+    dec  bp
+    jnz  ob_pair
+    mov  si, OFFSET game_tab
+    mov  di, OFFSET game_tab + OBST_FIRST
+    mov  cx, OBST_OBJS
+ob_check:
+    cmp  word ptr [di + OBJ_ATIVO], INATIVO
+    je   ob_next
+    cmp  word ptr [di + OBJ_RESOLVIDO], 0
+    jne  ob_remove
+    xor  dx, dx
+    cmp  word ptr [di + OBJ_TIPO], CRATER_TYPES
+    ja   ob_collision
+    inc  dx                     ; inclui contato com a superficie da pista
+ob_collision:
+    call RECT_HIT
+    jc   ob_hit
+    mov  ax, [di + OBJ_X]
+    add  ax, [di + OBJ_LARG]
+    cmp  ax, [si + OBJ_X]
+    jg   ob_remove              ; ainda nao passou completamente
+    mov  word ptr [di + OBJ_RESOLVIDO], 1
+    add  [score], OBST_POINTS
+    call DRAW_SCORE
+ob_remove:
+    mov  ax, [di + OBJ_X]
+    add  ax, [di + OBJ_LARG]
+    cmp  ax, 0
+    jg   ob_next
+    mov  word ptr [di + OBJ_ATIVO], INATIVO
+ob_next:
+    add  di, OBJ_TAM
+    loop ob_check
+    jmp  ob_done
+ob_hit:
+    mov  word ptr [di + OBJ_RESOLVIDO], 1
+    cmp  [lives], 0
+    je   ob_done
+    dec  [lives]
+    call DRAW_LIVES
+    mov  si, OFFSET game_tab0
+    mov  di, OFFSET game_tab
+    mov  cx, OBJ_TAM
+    call COPY_BYTES             ; restaura somente o registro inicial do jipe
+    mov  [jump_top_left], 0
+ob_done:
+    POP_ALL
+    ret
+OBSTACLES_STEP ENDP
 
 ;------------------------------------------------------------------------------
 ; UPDATE_TIME
@@ -1540,26 +1792,22 @@ GAME_OVER ENDP
 ; Saida  : nenhuma
 ;------------------------------------------------------------------------------
 DRAW_GAME_SCREEN PROC
-    push bx
     push cx
     push di
     call CLEAR_SCREEN
     call DRAW_TERRAIN
-    mov  bx, TRACK_Y
-    call DRAW_GROUND            ; a pista e fixa: desenhada uma vez
     mov  di, OFFSET game_tab
     mov  cx, GAME_OBJS
     call DRAW_OBJECTS
     call DRAW_STATUS
     pop  di
     pop  cx
-    pop  bx
     ret
 DRAW_GAME_SCREEN ENDP
 
 ;------------------------------------------------------------------------------
 ; DRAW_TERRAIN
-; Funcao : recompoe montanhas e ceu: o fundo pinta suas transparencias de
+; Funcao : recompoe montanhas, ceu e pista: o fundo pinta transparencias de
 ;          preto; a frente preserva o fundo, cobrindo o restante ate a pista.
 ; Entrada: [back_scroll], [front_scroll] = coluna de cada bitmap em x = 0
 ; Saida  : nenhuma
@@ -1576,6 +1824,8 @@ DRAW_TERRAIN PROC
     mov  dx, MOUNT_FRONT_Y
     mov  cl, TRANSPARENTE
     call DRAW_RLE_LAYER
+    mov  bx, TRACK_Y
+    call DRAW_GROUND            ; recompoe a pista apagada pelas crateras
     POP_ALL
     ret
 DRAW_TERRAIN ENDP
@@ -1950,8 +2200,8 @@ SET_MODE ENDP
 
 ;------------------------------------------------------------------------------
 ; WAIT_FRAME
-; Funcao : espera a duracao de um quadro (FRAME_DELAY_US) com a INT 15h/86h
-; Entrada: nenhuma
+; Funcao : espera o intervalo entre quadros com a INT 15h/86h
+; Entrada: AX = intervalo em microssegundos (1..65535)
 ; Saida  : nenhuma
 ;------------------------------------------------------------------------------
 WAIT_FRAME PROC
@@ -1959,7 +2209,7 @@ WAIT_FRAME PROC
     push cx
     push dx
     xor  cx, cx                 ; CX:DX = tempo em microssegundos
-    mov  dx, FRAME_DELAY_US
+    mov  dx, ax
     mov  ah, 86h
     int  15h
     pop  dx
