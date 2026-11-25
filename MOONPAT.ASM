@@ -1,12 +1,13 @@
 ;==============================================================================
-; MOON PATROL - PARTE 1: TELA INICIAL
+; MOON PATROL - MENU, JIPE, CENARIO, NAVES E TEMPO
 ;------------------------------------------------------------------------------
 ; Montador : TASM (GUI Turbo Assembler). Codigo 8086 puro (sem 186/286).
 ; Video    : modo 13h (320x200, 256 cores). Os pixels sao escritos no
 ;            segmento A000h somente com enderecamento indireto (ES:[DI]) e
 ;            instrucoes de string (REP STOSB); a INT 10h e usada apenas para
 ;            trocar o modo e escrever texto.
-; Teclas   : SETA CIMA/BAIXO escolhe, ENTER confirma, ESC sai
+; Teclas   : menu: CIMA/BAIXO e ENTER; jogo: ESQ./DIR. e CIMA para saltar
+;            ESC volta ao menu (ou sai, na tela inicial)
 ;==============================================================================
 .MODEL SMALL
 .STACK 400h
@@ -44,6 +45,8 @@ BOX_BORDERS     EQU 2           ; colunas ocupadas pelas bordas laterais
 ; --- Teclado (scan codes da INT 16h) ---
 KEY_UP          EQU 48h
 KEY_DOWN        EQU 50h
+KEY_LEFT        EQU 4Bh
+KEY_RIGHT       EQU 4Dh
 KEY_ENTER       EQU 1Ch
 KEY_ESC         EQU 01h
 
@@ -78,12 +81,15 @@ OBJ_ALT         EQU 8           ; altura em pixels
 OBJ_VX          EQU 10          ; velocidade horizontal (pixels/quadro)
 OBJ_VY          EQU 12          ; velocidade vertical (pixels/quadro)
 OBJ_SPRITE      EQU 14          ; offset do bitmap no DS
-OBJ_TAM         EQU 16          ; bytes de cada registro
+OBJ_TIPO        EQU 16          ; obstaculos: crateras 1..3, rochas 4..7
+OBJ_RESOLVIDO   EQU 18          ; 1 = ja pontuou ou causou perda de vida
+OBJ_TAM         EQU 20          ; bytes de cada registro
 ATIVO           EQU 1
 INATIVO         EQU 0
 
 ; --- Animacao da tela inicial ---
 FRAME_DELAY_US  EQU 14000       ; duracao de um quadro em microssegundos
+GAME_FRAME_US   EQU 60000       ; tempo para reagir e repetir as setas na partida
 ANIM_SHIPS      EQU 3           ; naves na animacao
 ANIM_SHIP_VX    EQU 1           ; naves: pixels por quadro (esq. -> dir.)
 ANIM_JEEP_VX    EQU 1           ; jipe: pixels por quadro (esq. -> dir.)
@@ -122,6 +128,48 @@ MOUNT_FRONT_W   EQU 256         ; colunas do bitmap da frente
 MOUNT_FRONT_H   EQU 64
 MOUNT_FRONT_Y   EQU TRACK_Y - MOUNT_FRONT_H     ; linha do topo da frente
 SCROLL_START    EQU 0           ; coluna do bitmap mostrada em x = 0
+SCROLL_SPEED    EQU 1           ; pixels/quadro para a esquerda (menor que as larguras)
+
+; --- Naves no jogo ---
+SHIP_MAX_GROUP  EQU 3
+SHIP_TYPES      EQU 3
+SHIP_SPEED      EQU 1           ; pixels/quadro para a esquerda
+SHIP_GAP        EQU 30          ; pixels livres entre os retangulos
+SHIP_STEP_X     EQU SHIP_W + SHIP_GAP
+SHIP_MIN_X      EQU SCREEN_W / 2
+SHIP_MAX_X      EQU SCREEN_W - SHIP_W
+SHIP_MIN_Y      EQU STATUS_H
+SHIP_MAX_Y      EQU MOUNT_TOP_Y - SHIP_H
+RANDOM_MULT     EQU 25173       ; gerador congruente de 16 bits
+RANDOM_ADD      EQU 13849
+
+; --- Obstaculos (pares cratera/rocha, na mesma tabela de objetos) ---
+CRATER_W        EQU 14
+CRATER_H        EQU 7
+CRATER_TYPES    EQU 3
+CRATER_MIN_GAP  EQU 150         ; pixels livres entre crateras consecutivas
+ROCK_W          EQU 12
+ROCK_H          EQU 10
+ROCK_TYPES      EQU 4           ; tipos 1..4 preservados como OBJ_TIPO 4..7
+ROCK_MARGIN     EQU 40          ; espaco livre de cada lado da rocha
+OBST_PAIRS      EQU 2
+OBST_OBJS       EQU 2 * OBST_PAIRS
+OBST_FIRST      EQU (1 + SHIP_MAX_GROUP) * OBJ_TAM
+OBST_GAP_RANDOM EQU 64          ; variacao adicional no espacamento das crateras
+OBST_POINTS     EQU 50
+COLOR_CRATER    EQU 2Ah         ; borda laranja
+COLOR_CRATER_DARK EQU 0A2h      ; marrom da borda interna
+COLOR_EARTH     EQU 73h         ; marrom das rochas
+COLOR_ROCK_DARK EQU 0BBh        ; sombra marrom-escura
+
+; --- Relogio e fim de jogo ---
+CS_PER_SECOND   EQU 100
+CS_PER_MINUTE   EQU 60 * CS_PER_SECOND
+CLOCK_UNSET     EQU 0FFFFh
+COLOR_OVER      EQU 04h
+OVER_ROW        EQU 6
+OVER_LINES      EQU 5
+OVER_SCORE_ROW  EQU OVER_ROW + 2 * (OVER_LINES + 1) + 1
 
 ; --- Barra de status (layout de "status do jogo.png") ---
 ; [coracoes]            [score]               [relogio] [tempo]
@@ -153,6 +201,14 @@ GAME_TIME       EQU 60          ; duracao da partida em segundos (<= 99)
 PARADO          EQU 0           ; velocidade nula
 JEEP_START_X    EQU 0           ; coluna em que o jipe nasce/renasce
 JEEP_GAME_Y     EQU TRACK_Y - JEEP_H                ; jipe no chao
+JEEP_SPEED      EQU 6           ; permite transpor a rocha durante o salto curto
+JEEP_MIN_X      EQU 0
+JEEP_MAX_X      EQU SCREEN_W / 2 - JEEP_W    ; sprite inteiro na metade esquerda
+JUMP_HEIGHT     EQU 15          ; altura maxima acima do chao
+JUMP_SPEED      EQU 3           ; pixels verticais por quadro
+JUMP_TOP_Y      EQU JEEP_GAME_Y - JUMP_HEIGHT
+JUMP_TOP_DX     EQU 5           ; percurso horizontal no topo
+JUMP_WORLD_VX   EQU SCROLL_SPEED ; topo acompanha o deslocamento real do terreno
 
 ;==============================================================================
 ; MACROS
@@ -196,6 +252,18 @@ title_patrol    DB ' ____   _  _____ ____   ___  _     ',0
                 DB '|  __/ ___ \| | |  _ <| |_| | |___ ',0
                 DB '|_| /_/   \_\_| |_| \_\\___/|_____|',0
 
+; GAME OVER em dois blocos de arte ASCII (mesmo desenho de texto do titulo).
+over_game       DB ' ###    #   #   # #####',0
+                DB '#   #  # #  ## ## #    ',0
+                DB '#     ##### # # # #### ',0
+                DB '#  ## #   # #   # #    ',0
+                DB ' ###  #   # #   # #####',0
+over_over       DB ' ###  #   # ##### #### ',0
+                DB '#   # #   # #     #   #',0
+                DB '#   # #   # ####  #### ',0
+                DB '#   #  # #  #     #  # ',0
+                DB ' ###    #   ##### #   #',0
+
 ; Textos do menu e tabela com o endereco de cada um (indice = opcao)
 menu_opt_play   DB 'Jogar',0
 menu_opt_exit   DB 'Sair',0
@@ -213,6 +281,11 @@ lives           DW LIVES_START
 time_left       DW GAME_TIME                    ; segundos restantes
 back_scroll     DW SCROLL_START                 ; 0 .. MOUNT_BACK_W - 1
 front_scroll    DW SCROLL_START                 ; 0 .. MOUNT_FRONT_W - 1
+jump_top_left   DW 0                            ; pixels restantes no topo
+clock_last      DW CLOCK_UNSET                  ; centesimos dentro do minuto
+clock_frac      DW 0                            ; fracao de segundo acumulada
+random_seed     DW 0
+last_crater_x   DW 0                            ; X da ultima cratera gerada
 num_buf         DB NUM_MAX_DIGITS + 1 DUP (0)   ; digitos + 0 final
 
 ; Sprites: 1 byte por pixel (cor), linha a linha. 0FFh = transparente.
@@ -277,16 +350,89 @@ spr_ship3   DB 0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,
             DB 0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh
             DB 0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh,0FFh
 
+; Obstaculos das Figuras 11 e 12: 1 byte/pixel, linhas consecutivas.
+; Nas crateras, o interior e preto; nas rochas, o exterior e transparente.
+spr_crater1   DB COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER_DARK
+              DB COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+
+spr_crater2   DB COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER_DARK
+              DB COLOR_CRATER,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+
+spr_crater3   DB COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER_DARK
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_BG,COLOR_BG,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_BG,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+              DB COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER_DARK,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER,COLOR_CRATER
+
+spr_rock1     DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+
+spr_rock2     DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,TRANSPARENTE,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE
+              DB COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE
+              DB COLOR_EARTH,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE
+
+spr_rock3     DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE
+              DB COLOR_ROCK_DARK,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE
+
+spr_rock4     DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE
+              DB TRANSPARENTE,TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_ROCK_DARK,TRANSPARENTE
+              DB TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,TRANSPARENTE
+              DB TRANSPARENTE,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK,COLOR_EARTH,COLOR_EARTH,COLOR_ROCK_DARK
+              DB COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH,COLOR_EARTH
+
+obst_ptrs      DW OFFSET spr_crater1, OFFSET spr_crater2, OFFSET spr_crater3
+               DW OFFSET spr_rock1, OFFSET spr_rock2, OFFSET spr_rock3, OFFSET spr_rock4
+
 ; Tabela inicial da animacao: copiada para anim_tab sempre que o menu abre.
-; Campos de cada registro: ATIVO, X, Y, LARG, ALT, VX, VY, SPRITE
+; Campos: ATIVO, X, Y, LARG, ALT, VX, VY, SPRITE, TIPO, RESOLVIDO
 anim_tab0   DW ATIVO, ANIM_SHIP_X0, ANIM_SHIP_Y
-            DW SHIP_W, SHIP_H, ANIM_SHIP_VX, ANIM_VY, OFFSET spr_ship1
+            DW SHIP_W, SHIP_H, ANIM_SHIP_VX, ANIM_VY, OFFSET spr_ship1, 0, 0
             DW ATIVO, ANIM_SHIP_X0 + ANIM_SHIP_DX, ANIM_SHIP_Y + ANIM_SHIP_DY
-            DW SHIP_W, SHIP_H, ANIM_SHIP_VX, ANIM_VY, OFFSET spr_ship2
+            DW SHIP_W, SHIP_H, ANIM_SHIP_VX, ANIM_VY, OFFSET spr_ship2, 0, 0
             DW ATIVO, ANIM_SHIP_X0 + 2 * ANIM_SHIP_DX, ANIM_SHIP_Y
-            DW SHIP_W, SHIP_H, ANIM_SHIP_VX, ANIM_VY, OFFSET spr_ship3
+            DW SHIP_W, SHIP_H, ANIM_SHIP_VX, ANIM_VY, OFFSET spr_ship3, 0, 0
             DW ATIVO, JEEP_X0, MENU_JEEP_Y
-            DW JEEP_W, JEEP_H, ANIM_JEEP_VX, ANIM_VY, OFFSET spr_jeep
+            DW JEEP_W, JEEP_H, ANIM_JEEP_VX, ANIM_VY, OFFSET spr_jeep, 0, 0
 ANIM_TAB_BYTES  EQU $ - anim_tab0
 ANIM_OBJS       EQU ANIM_TAB_BYTES / OBJ_TAM    ; naves + jipe
 
@@ -1063,14 +1209,21 @@ spr_clock   DB 0FFh,0FFh,0Eh,0Eh,0Eh,0FFh,0FFh
 heart_ptrs  DW OFFSET spr_heart1, OFFSET spr_heart2, OFFSET spr_heart3
 heart_ws    DW HEART1_W, HEART2_W, HEART3_W
 
-; Tabela inicial dos objetos do jogo (por enquanto so o jipe).
-; Campos de cada registro: ATIVO, X, Y, LARG, ALT, VX, VY, SPRITE
+; Tabela: jipe, vagas das naves, pares cratera/rocha.
+; Campos: ATIVO, X, Y, LARG, ALT, VX, VY, SPRITE, TIPO, RESOLVIDO
 game_tab0   DW ATIVO, JEEP_START_X, JEEP_GAME_Y
-            DW JEEP_W, JEEP_H, PARADO, PARADO, OFFSET spr_jeep
+            DW JEEP_W, JEEP_H, PARADO, PARADO, OFFSET spr_jeep, 0, 0
+            DW (SHIP_MAX_GROUP + OBST_OBJS) * (OBJ_TAM / WORD_BYTES) DUP (0)
 GAME_TAB_BYTES  EQU $ - game_tab0
 GAME_OBJS       EQU GAME_TAB_BYTES / OBJ_TAM
 
 game_tab    DB GAME_TAB_BYTES DUP (?)           ; estado atual dos objetos
+
+; Molde de um par. O tipo e o sprite sao sorteados ao ocupar a vaga.
+obst_tab0   DW ATIVO, 0, TRACK_Y, CRATER_W, CRATER_H
+            DW -SCROLL_SPEED, PARADO, 0, 0, 0
+            DW ATIVO, 0, TRACK_Y - ROCK_H, ROCK_W, ROCK_H
+            DW -SCROLL_SPEED, PARADO, 0, 0, 0
 
 ;==============================================================================
 ; CODIGO
@@ -1121,6 +1274,7 @@ MENU_RUN PROC
     call DRAW_MENU
     call FLUSH_KEYS
 mr_frame:
+    mov  ax, FRAME_DELAY_US
     call WAIT_FRAME
     call ANIM_STEP
     call GET_KEY_NB             ; AX = tecla ou 0
@@ -1157,11 +1311,11 @@ MENU_RUN ENDP
 
 ;------------------------------------------------------------------------------
 ; GAME_RUN
-; Funcao : laco principal do jogo. Por enquanto so inicializa a partida,
-;          desenha a tela de jogo e espera ESC para voltar ao menu
-;          (le teclado sem esperar -> [atualiza] -> [desenha] -> pausa)
+; Funcao : atualiza tempo, objetos/salto e terreno; ESC retorna ao menu.
+;          Tempo ou vidas zerados mostram Game Over antes do retorno.
 ; Entrada: nenhuma
-; Saida  : nenhuma
+; Saida  : estado da partida atualizado (registradores preservados)
+; Usa    : AX, CX, DI; demais registradores usados pelas rotinas chamadas
 ;------------------------------------------------------------------------------
 GAME_RUN PROC
     PUSH_ALL
@@ -1169,12 +1323,26 @@ GAME_RUN PROC
     call DRAW_GAME_SCREEN
     call FLUSH_KEYS
 gr_frame:
-    call WAIT_FRAME
+    call UPDATE_TIME
+    cmp  [time_left], 0
+    je   gr_over
+    cmp  [lives], 0
+    je   gr_over
     call GET_KEY_NB             ; AX = tecla ou 0
-    or   ax, ax
-    jz   gr_frame
     cmp  ah, KEY_ESC
-    jne  gr_frame               ; demais teclas: ainda sem acao
+    je   gr_done
+    mov  di, OFFSET game_tab
+    mov  cx, GAME_OBJS
+    call ERASE_OBJECTS          ; posicoes antigas; o terreno sera restaurado
+    call GAME_STEP
+    call DRAW_TERRAIN           ; recompoe montanhas e pista apagadas
+    call DRAW_OBJECTS
+    mov  ax, GAME_FRAME_US
+    call WAIT_FRAME
+    jmp  gr_frame
+gr_over:
+    call GAME_OVER
+gr_done:
     POP_ALL
     ret
 GAME_RUN ENDP
@@ -1182,11 +1350,13 @@ GAME_RUN ENDP
 ;------------------------------------------------------------------------------
 ; GAME_INIT
 ; Funcao : coloca a partida no estado inicial (score, vidas, tempo, scroll
-;          do terreno e tabela de objetos)
+;          do terreno, salto, relogio e tabela de objetos com o primeiro grupo)
 ; Entrada: nenhuma
-; Saida  : variaveis da partida e game_tab inicializadas
+; Saida  : variaveis da partida e game_tab inicializadas (registradores preservados)
+; Usa    : AX, CX, SI, DI; rotinas chamadas preservam seus registradores
 ;------------------------------------------------------------------------------
 GAME_INIT PROC
+    push ax
     push cx
     push si
     push di
@@ -1195,15 +1365,424 @@ GAME_INIT PROC
     mov  [time_left], GAME_TIME
     mov  [back_scroll], SCROLL_START
     mov  [front_scroll], SCROLL_START
+    mov  [jump_top_left], 0
+    mov  [last_crater_x], SCREEN_W - CRATER_W - CRATER_MIN_GAP
+    mov  [clock_last], CLOCK_UNSET
+    mov  [clock_frac], 0
+    call UPDATE_TIME            ; apenas registra o instante inicial
+    mov  ax, [clock_last]
+    mov  [random_seed], ax
     mov  si, OFFSET game_tab0
     mov  di, OFFSET game_tab
     mov  cx, GAME_TAB_BYTES
     call COPY_BYTES
+    call SHIPS_STEP
+    call OBSTACLES_STEP
     pop  di
     pop  si
     pop  cx
+    pop  ax
     ret
 GAME_INIT ENDP
+
+;------------------------------------------------------------------------------
+; GAME_STEP
+; Funcao : define as velocidades pelas setas e controla os limites e o salto.
+;          MOVE_OBJECTS continua sendo a unica rotina que aplica velocidades.
+;          OBJ_VY < 0 = subida; Y = topo e VY = 0 = topo; VY > 0 = descida.
+;          O topo conta o deslocamento do terreno, mesmo sem seta horizontal.
+;          Move naves/obstaculos, resolve colisoes/pontos e avanca o scroll.
+; Entrada: AH = scan code ou 0; game_tab e variaveis da partida
+; Saida  : objetos, salto, scroll, score e vidas atualizados (registradores salvos)
+; Usa    : CX, DI; AX e usado por MOVE_OBJECTS (tambem preservado)
+;------------------------------------------------------------------------------
+GAME_STEP PROC
+    push cx
+    push di
+    mov  di, OFFSET game_tab
+    mov  word ptr [di + OBJ_VX], PARADO
+    cmp  ah, KEY_LEFT
+    je   gs_left
+    cmp  ah, KEY_RIGHT
+    je   gs_right
+    cmp  ah, KEY_UP
+    jne  gs_top
+    cmp  word ptr [di + OBJ_Y], JEEP_GAME_Y
+    jne  gs_top                 ; nao inicia outro salto no ar
+    mov  word ptr [di + OBJ_VY], -JUMP_SPEED
+    jmp  gs_top
+gs_left:
+    mov  word ptr [di + OBJ_VX], -JEEP_SPEED
+    jmp  gs_top
+gs_right:
+    mov  word ptr [di + OBJ_VX], JEEP_SPEED
+gs_top:
+    cmp  word ptr [di + OBJ_Y], JUMP_TOP_Y
+    jne  gs_move
+    cmp  word ptr [di + OBJ_VY], PARADO
+    jne  gs_move
+    sub  [jump_top_left], JUMP_WORLD_VX
+    ja   gs_move
+    mov  word ptr [di + OBJ_VY], JUMP_SPEED
+gs_move:
+    mov  cx, GAME_OBJS
+    call MOVE_OBJECTS
+    cmp  word ptr [di + OBJ_X], JEEP_MIN_X
+    jge  gs_right_limit
+    mov  word ptr [di + OBJ_X], JEEP_MIN_X
+gs_right_limit:
+    cmp  word ptr [di + OBJ_X], JEEP_MAX_X
+    jle  gs_jump
+    mov  word ptr [di + OBJ_X], JEEP_MAX_X
+gs_jump:
+    cmp  word ptr [di + OBJ_VY], PARADO
+    jge  gs_ground
+    cmp  word ptr [di + OBJ_Y], JUMP_TOP_Y
+    jg   gs_done
+    mov  word ptr [di + OBJ_Y], JUMP_TOP_Y
+    mov  word ptr [di + OBJ_VY], PARADO
+    mov  [jump_top_left], JUMP_TOP_DX
+    jmp  gs_done
+gs_ground:
+    cmp  word ptr [di + OBJ_Y], JEEP_GAME_Y
+    jl   gs_done
+    mov  word ptr [di + OBJ_Y], JEEP_GAME_Y
+    mov  word ptr [di + OBJ_VY], PARADO
+gs_done:
+    call SHIPS_STEP
+    add  [back_scroll], SCROLL_SPEED
+    cmp  [back_scroll], MOUNT_BACK_W
+    jb   gs_front
+    sub  [back_scroll], MOUNT_BACK_W
+gs_front:
+    add  [front_scroll], SCROLL_SPEED
+    cmp  [front_scroll], MOUNT_FRONT_W
+    jb   gs_end
+    sub  [front_scroll], MOUNT_FRONT_W
+gs_end:
+    sub  [last_crater_x], SCROLL_SPEED
+    call OBSTACLES_STEP
+    pop  di
+    pop  cx
+    ret
+GAME_STEP ENDP
+
+;------------------------------------------------------------------------------
+; RANDOM_RANGE
+; Funcao : avanca a semente de 16 bits e sorteia um valor em um intervalo
+; Entrada: CX = limite exclusivo, maior que zero; random_seed
+; Saida  : AX = 0 .. CX-1; semente atualizada; demais registradores preservados
+; Usa    : AX, BX, DX
+;------------------------------------------------------------------------------
+RANDOM_RANGE PROC
+    push bx
+    push dx
+    mov  ax, [random_seed]
+    mov  bx, RANDOM_MULT
+    mul  bx
+    add  ax, RANDOM_ADD
+    mov  [random_seed], ax
+    xor  al, ah                 ; mistura os bytes para sorteios de 2/4 tipos
+    xor  dx, dx
+    div  cx
+    mov  ax, dx
+    pop  dx
+    pop  bx
+    ret
+RANDOM_RANGE ENDP
+
+;------------------------------------------------------------------------------
+; SHIPS_STEP
+; Funcao : desativa naves totalmente fora da tela; se nao sobrou nenhuma,
+;          sorteia um grupo do mesmo tipo. X inicial aleatorio na metade
+;          direita, com SHIP_GAP pixels livres; cada Y e sorteado separadamente.
+; Entrada: game_tab, random_seed (chamar depois de MOVE_OBJECTS)
+; Saida  : vagas das naves e semente atualizadas; registradores preservados
+; Usa    : AX, BX, CX, DX, SI, DI, BP
+;------------------------------------------------------------------------------
+SHIPS_STEP PROC
+    PUSH_ALL
+    mov  di, OFFSET game_tab + OBJ_TAM
+    mov  cx, SHIP_MAX_GROUP
+    xor  bx, bx                 ; quantidade ainda ativa
+ss_check:
+    cmp  word ptr [di + OBJ_ATIVO], INATIVO
+    je   ss_next
+    cmp  word ptr [di + OBJ_X], -SHIP_W
+    jg   ss_alive
+    mov  word ptr [di + OBJ_ATIVO], INATIVO
+    jmp  ss_next
+ss_alive:
+    inc  bx
+ss_next:
+    add  di, OBJ_TAM
+    loop ss_check
+    or   bx, bx
+    jnz  ss_done
+    mov  cx, SHIP_MAX_GROUP
+    call RANDOM_RANGE
+    inc  ax
+    mov  bp, ax                 ; quantidade do novo grupo
+    mov  cx, SHIP_TYPES
+    call RANDOM_RANGE
+    call SHIP_SPRITE            ; SI = bitmap comum a todas as naves
+    mov  ax, bp
+    dec  ax
+    mov  bx, SHIP_STEP_X
+    mul  bx                     ; espaco ocupado pelas separacoes
+    mov  cx, SHIP_MAX_X - SHIP_MIN_X + 1
+    sub  cx, ax                 ; garante que a ultima nave tambem caiba
+    call RANDOM_RANGE
+    add  ax, SHIP_MIN_X
+    mov  bx, ax                 ; X da primeira nave
+    mov  di, OFFSET game_tab + OBJ_TAM
+    mov  cx, bp
+ss_spawn:
+    mov  word ptr [di + OBJ_ATIVO], ATIVO
+    mov  [di + OBJ_X], bx
+    mov  word ptr [di + OBJ_LARG], SHIP_W
+    mov  word ptr [di + OBJ_ALT], SHIP_H
+    mov  word ptr [di + OBJ_VX], -SHIP_SPEED
+    mov  word ptr [di + OBJ_VY], PARADO
+    mov  [di + OBJ_SPRITE], si
+    push cx
+    mov  cx, SHIP_MAX_Y - SHIP_MIN_Y + 1
+    call RANDOM_RANGE
+    add  ax, SHIP_MIN_Y
+    mov  [di + OBJ_Y], ax
+    pop  cx
+    add  bx, SHIP_STEP_X
+    add  di, OBJ_TAM
+    loop ss_spawn
+ss_done:
+    POP_ALL
+    ret
+SHIPS_STEP ENDP
+
+;------------------------------------------------------------------------------
+; RECT_HIT
+; Funcao : testa sobreposicao retangular; bordas apenas encostadas nao colidem
+; Entrada: SI, DI = objetos no DS; DX = extensao inferior do primeiro retangulo
+;          (0 normalmente; 1 para detectar pneus apoiados na borda da cratera)
+; Saida  : CF = 1 se colidem, 0 caso contrario; registradores preservados
+; Usa    : AX, BX
+;------------------------------------------------------------------------------
+RECT_HIT PROC
+    push ax
+    push bx
+    mov  ax, [si + OBJ_X]
+    mov  bx, [di + OBJ_X]
+    add  ax, [si + OBJ_LARG]
+    cmp  ax, bx
+    jle  rh_no
+    add  bx, [di + OBJ_LARG]
+    cmp  bx, [si + OBJ_X]
+    jle  rh_no
+    mov  ax, [si + OBJ_Y]
+    add  ax, [si + OBJ_ALT]
+    add  ax, dx
+    cmp  ax, [di + OBJ_Y]
+    jle  rh_no
+    mov  bx, [di + OBJ_Y]
+    add  bx, [di + OBJ_ALT]
+    cmp  bx, [si + OBJ_Y]
+    jle  rh_no
+    stc
+    jmp  rh_done
+rh_no:
+    clc
+rh_done:
+    pop  bx
+    pop  ax
+    ret
+RECT_HIT ENDP
+
+;------------------------------------------------------------------------------
+; OBSTACLES_STEP
+; Funcao : ocupa pares livres com cratera e rocha aleatorias, testa colisao,
+;          pontua ao passar completamente e remove objetos fora da tela.
+;          RESOLVIDO evita repetir pontos ou penalidades ate reciclar a vaga.
+; Entrada: game_tab, last_crater_x, random_seed, score, lives, jump_top_left
+; Saida  : estado e barra atualizados; colisao recoloca o jipe em X=0, no chao
+; Usa    : AX, BX, CX, DX, SI, DI, BP (todos preservados)
+;------------------------------------------------------------------------------
+OBSTACLES_STEP PROC
+    PUSH_ALL
+    mov  di, OFFSET game_tab + OBST_FIRST
+    mov  bp, OBST_PAIRS
+ob_pair:
+    cmp  word ptr [di + OBJ_ATIVO], INATIVO
+    jne  ob_pair_next
+    cmp  word ptr [di + OBJ_TAM + OBJ_ATIVO], INATIVO
+    jne  ob_pair_next
+    mov  si, OFFSET obst_tab0
+    mov  cx, 2 * OBJ_TAM
+    call COPY_BYTES
+    mov  cx, OBST_GAP_RANDOM
+    call RANDOM_RANGE
+    add  ax, [last_crater_x]
+    add  ax, CRATER_W + CRATER_MIN_GAP
+    cmp  ax, SCREEN_W
+    jge  ob_crater_x
+    mov  ax, SCREEN_W
+ob_crater_x:
+    mov  [last_crater_x], ax
+    mov  [di + OBJ_X], ax
+    mov  cx, CRATER_MIN_GAP - ROCK_W - 2 * ROCK_MARGIN + 1
+    call RANDOM_RANGE
+    add  ax, [di + OBJ_X]
+    add  ax, CRATER_W + ROCK_MARGIN
+    mov  [di + OBJ_TAM + OBJ_X], ax
+    mov  cx, CRATER_TYPES
+    call RANDOM_RANGE
+    mov  si, ax
+    shl  si, 1
+    mov  si, [obst_ptrs + si]
+    mov  [di + OBJ_SPRITE], si
+    inc  ax
+    mov  [di + OBJ_TIPO], ax
+    mov  cx, ROCK_TYPES
+    call RANDOM_RANGE
+    add  ax, CRATER_TYPES
+    mov  si, ax
+    shl  si, 1
+    mov  si, [obst_ptrs + si]
+    mov  [di + OBJ_TAM + OBJ_SPRITE], si
+    inc  ax
+    mov  [di + OBJ_TAM + OBJ_TIPO], ax
+ob_pair_next:
+    add  di, 2 * OBJ_TAM
+    dec  bp
+    jnz  ob_pair
+    mov  si, OFFSET game_tab
+    mov  di, OFFSET game_tab + OBST_FIRST
+    mov  cx, OBST_OBJS
+ob_check:
+    cmp  word ptr [di + OBJ_ATIVO], INATIVO
+    je   ob_next
+    cmp  word ptr [di + OBJ_RESOLVIDO], 0
+    jne  ob_remove
+    xor  dx, dx
+    cmp  word ptr [di + OBJ_TIPO], CRATER_TYPES
+    ja   ob_collision
+    inc  dx                     ; inclui contato com a superficie da pista
+ob_collision:
+    call RECT_HIT
+    jc   ob_hit
+    mov  ax, [di + OBJ_X]
+    add  ax, [di + OBJ_LARG]
+    cmp  ax, [si + OBJ_X]
+    jg   ob_remove              ; ainda nao passou completamente
+    mov  word ptr [di + OBJ_RESOLVIDO], 1
+    add  [score], OBST_POINTS
+    call DRAW_SCORE
+ob_remove:
+    mov  ax, [di + OBJ_X]
+    add  ax, [di + OBJ_LARG]
+    cmp  ax, 0
+    jg   ob_next
+    mov  word ptr [di + OBJ_ATIVO], INATIVO
+ob_next:
+    add  di, OBJ_TAM
+    loop ob_check
+    jmp  ob_done
+ob_hit:
+    mov  word ptr [di + OBJ_RESOLVIDO], 1
+    cmp  [lives], 0
+    je   ob_done
+    dec  [lives]
+    call DRAW_LIVES
+    mov  si, OFFSET game_tab0
+    mov  di, OFFSET game_tab
+    mov  cx, OBJ_TAM
+    call COPY_BYTES             ; restaura somente o registro inicial do jipe
+    mov  [jump_top_left], 0
+ob_done:
+    POP_ALL
+    ret
+OBSTACLES_STEP ENDP
+
+;------------------------------------------------------------------------------
+; UPDATE_TIME
+; Funcao : acumula centesimos do relogio DOS, desconta segundos completos
+;          (inclusive se um quadro demorar mais de 1 s) e atualiza so o tempo.
+;          Corrige a virada do minuto; chamar ao menos uma vez por minuto.
+; Entrada: clock_last (CLOCK_UNSET para iniciar), clock_frac, time_left
+; Saida  : relogio e time_left atualizados, sem ficar negativo; registradores salvos
+; Usa    : AX, BX, CX, DX (INT 21h/2Ch); DRAW_TIME preserva os demais
+;------------------------------------------------------------------------------
+UPDATE_TIME PROC
+    PUSH_ALL
+    mov  ah, 2Ch
+    int  21h                    ; DH = segundos, DL = centesimos
+    mov  al, dh
+    mov  ah, CS_PER_SECOND
+    mul  ah
+    xor  dh, dh
+    add  ax, dx                 ; AX = centesimos dentro do minuto
+    mov  bx, ax
+    cmp  [clock_last], CLOCK_UNSET
+    je   ut_stamp
+    sub  ax, [clock_last]
+    jnc  ut_elapsed
+    add  ax, CS_PER_MINUTE
+ut_elapsed:
+    mov  [clock_last], bx
+    add  ax, [clock_frac]
+    xor  dx, dx
+    mov  bx, CS_PER_SECOND
+    div  bx                     ; AX = segundos completos, DX = fracao
+    mov  [clock_frac], dx
+    or   ax, ax
+    jz   ut_done
+    cmp  ax, [time_left]
+    jb   ut_sub
+    mov  ax, [time_left]         ; limita o desconto ao tempo restante
+ut_sub:
+    sub  [time_left], ax
+    call DRAW_TIME
+    jmp  ut_done
+ut_stamp:
+    mov  [clock_last], bx
+ut_done:
+    POP_ALL
+    ret
+UPDATE_TIME ENDP
+
+;------------------------------------------------------------------------------
+; GAME_OVER
+; Funcao : mostra GAME OVER vermelho em dois blocos ASCII e o score final;
+;          descarta teclas anteriores e espera qualquer tecla para voltar
+; Entrada: score
+; Saida  : nenhuma (registradores preservados)
+; Usa    : AX, BX, CX, DX, SI e as rotinas de texto existentes
+;------------------------------------------------------------------------------
+GAME_OVER PROC
+    PUSH_ALL
+    call CLEAR_SCREEN
+    mov  bl, COLOR_OVER
+    xor  al, al
+    mov  ah, TEXT_COLS
+    mov  si, OFFSET over_game
+    call CENTER_TEXT
+    mov  dh, OVER_ROW
+    mov  cx, OVER_LINES
+    call PRINT_BLOCK
+    mov  si, OFFSET over_over
+    call CENTER_TEXT
+    mov  dh, OVER_ROW + OVER_LINES + 1
+    call PRINT_BLOCK
+    mov  ax, [score]
+    mov  cx, SCORE_DIGITS
+    mov  dh, OVER_SCORE_ROW
+    mov  dl, SCORE_COL
+    mov  bl, COLOR_NORMAL
+    call PRINT_NUMBER
+    call FLUSH_KEYS
+    call WAIT_KEY
+    POP_ALL
+    ret
+GAME_OVER ENDP
 
 ;------------------------------------------------------------------------------
 ; DRAW_GAME_SCREEN
@@ -1228,8 +1807,8 @@ DRAW_GAME_SCREEN ENDP
 
 ;------------------------------------------------------------------------------
 ; DRAW_TERRAIN
-; Funcao : desenha a montanha do fundo, a montanha da frente por cima dela
-;          e a pista
+; Funcao : recompoe montanhas, ceu e pista: o fundo pinta transparencias de
+;          preto; a frente preserva o fundo, cobrindo o restante ate a pista.
 ; Entrada: [back_scroll], [front_scroll] = coluna de cada bitmap em x = 0
 ; Saida  : nenhuma
 ;------------------------------------------------------------------------------
@@ -1238,13 +1817,15 @@ DRAW_TERRAIN PROC
     mov  bx, OFFSET back_cols
     mov  ax, [back_scroll]
     mov  dx, MOUNT_BACK_Y
+    mov  cl, COLOR_BG
     call DRAW_RLE_LAYER
     mov  bx, OFFSET front_cols
     mov  ax, [front_scroll]
     mov  dx, MOUNT_FRONT_Y
+    mov  cl, TRANSPARENTE
     call DRAW_RLE_LAYER
     mov  bx, TRACK_Y
-    call DRAW_GROUND            ; pista amarela
+    call DRAW_GROUND            ; recompoe a pista apagada pelas crateras
     POP_ALL
     ret
 DRAW_TERRAIN ENDP
@@ -1619,8 +2200,8 @@ SET_MODE ENDP
 
 ;------------------------------------------------------------------------------
 ; WAIT_FRAME
-; Funcao : espera a duracao de um quadro (FRAME_DELAY_US) com a INT 15h/86h
-; Entrada: nenhuma
+; Funcao : espera o intervalo entre quadros com a INT 15h/86h
+; Entrada: AX = intervalo em microssegundos (1..65535)
 ; Saida  : nenhuma
 ;------------------------------------------------------------------------------
 WAIT_FRAME PROC
@@ -1628,7 +2209,7 @@ WAIT_FRAME PROC
     push cx
     push dx
     xor  cx, cx                 ; CX:DX = tempo em microssegundos
-    mov  dx, FRAME_DELAY_US
+    mov  dx, ax
     mov  ah, 86h
     int  15h
     pop  dx
@@ -1818,15 +2399,17 @@ CLEAR_SCREEN ENDP
 ;          estendida (largura + SCREEN_W entradas), entao a emenda do fim
 ;          com o inicio do bitmap sai sem nenhum teste.
 ;          Cada coluna RLE e uma lista de pares (quantidade, cor), de cima
-;          para baixo, terminada por 0; a cor TRANSPARENTE so pula linhas.
+;          para baixo, terminada por 0; CL define como tratar transparencias.
 ; Entrada: BX = tabela de colunas da camada (DW, offsets no DS),
 ;          AX = scroll (coluna do bitmap mostrada em x = 0; 0 .. largura-1),
-;          DX = linha do topo da camada
+;          DX = linha do topo da camada,
+;          CL = cor do ceu ou TRANSPARENTE para preservar a camada anterior
 ; Saida  : nenhuma
 ;------------------------------------------------------------------------------
 DRAW_RLE_LAYER PROC
     PUSH_ALL
     push es
+    push cx                     ; guarda a cor de reposicao das transparencias
     shl  ax, 1                  ; scroll * 2 (tabela de words)
     add  bx, ax                 ; BX = entrada da coluna mostrada em x = 0
     push bx
@@ -1837,6 +2420,8 @@ DRAW_RLE_LAYER PROC
     mov  bp, di                 ; BP = topo da coluna atual da tela
     mov  ax, VIDEO_SEG
     mov  es, ax
+    pop  ax
+    mov  ah, al                 ; AH = reposicao; LODSB altera somente AL
     cld
     mov  dx, SCREEN_W           ; DX = colunas da tela que faltam
 rl_col:
@@ -1850,7 +2435,10 @@ rl_run:
     xor  ch, ch                 ; CX = quantidade
     lodsb                       ; AL = cor
     cmp  al, TRANSPARENTE
+    jne  rl_pixel
+    cmp  ah, TRANSPARENTE
     je   rl_skip
+    mov  al, ah                 ; camada do fundo tambem restaura o ceu
 rl_pixel:
     mov  es:[di], al            ; enderecamento indireto via DI
     add  di, SCREEN_W           ; desce uma linha
